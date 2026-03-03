@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "crates/sc-core",
+    "crates/sc",
+    "crates/sc-nixgen",
+]
+resolver = "2"

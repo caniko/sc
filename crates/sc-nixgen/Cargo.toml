@@ -1,0 +1,14 @@
+[package]
+name = "sc-nixgen"
+version = "0.1.0"
+edition = "2021"
+description = "Generate optimized NixOS configs from SmartCool tuning data"
+
+[[bin]]
+name = "sc-nixgen"
+path = "src/main.rs"
+
+[dependencies]
+sc-core = { path = "../sc-core" }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
