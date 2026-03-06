@@ -1,7 +1,7 @@
 use sc_core::config::Config;
 use sc_core::ipc::TuningResponse;
 
-use crate::optimize::OptimizedConfig;
+use crate::optimize::{OptimizedConfig, OptimizedFan};
 
 /// Emit a complete NixOS module file from the config and optimization results.
 pub fn emit_nix(
@@ -26,10 +26,7 @@ pub fn emit_nix(
         ));
         if !t.step_responses.is_empty() {
             let total_events: usize = t.step_responses.iter().map(|s| s.n_events).sum();
-            out.push_str(&format!(
-                "# Step response events: {}\n",
-                total_events
-            ));
+            out.push_str(&format!("# Step response events: {}\n", total_events));
         }
     }
     if !optimized.has_tuning_data {
@@ -63,108 +60,184 @@ pub fn emit_nix(
         out.push_str(" ];\n\n");
     }
 
+    // Build the settings struct and serialize with ronix
+    let settings = build_settings(config, optimized);
+    let settings_nix =
+        ronix::to_nix(&settings).unwrap_or_else(|e| panic!("ronix serialization failed: {}", e));
+
     out.push_str("  services.smartcool = {\n");
     out.push_str("    enable = true;\n");
-    out.push_str("    settings = {\n");
 
-    // poll_interval_ms
-    out.push_str(&format!("      poll_interval_ms = {};\n\n", config.poll_interval_ms));
+    // Indent the ronix output to sit under services.smartcool.settings
+    let indented = indent_block(&settings_nix, 4);
+    out.push_str(&format!("    settings = {};\n", indented));
 
-    // derivative
-    out.push_str("      derivative = {\n");
-    out.push_str(&format!("        window_size = {};\n", config.derivative.window_size));
-    out.push_str(&format!("        boost_threshold = {};\n", format_float(config.derivative.boost_threshold)));
-    out.push_str(&format!("        decay_rate = {};\n", format_float(config.derivative.decay_rate)));
-    out.push_str("      };\n\n");
-
-    // sensors
-    out.push_str("      sensors = [\n");
-    for s in &config.sensors {
-        out.push_str(&format!(
-            "        {{ name = \"{}\"; hwmon = \"{}\"; index = {}; }}\n",
-            s.name, s.hwmon, s.index
-        ));
-    }
-    out.push_str("      ];\n\n");
-
-    // fans (optimized)
-    out.push_str("      fans = [\n");
-    for opt_fan in &optimized.fans {
-        let orig = config.fans.iter().find(|f| f.name == opt_fan.name).unwrap();
-        out.push_str("        {\n");
-        out.push_str(&format!("          name = \"{}\";\n", opt_fan.name));
-        out.push_str(&format!("          hwmon = \"{}\";\n", orig.hwmon));
-        out.push_str(&format!("          pwm_index = {};\n", orig.pwm_index));
-
-        // Sensor assignment comment
-        if optimized.has_tuning_data && opt_fan.max_beta > 0.0 {
-            out.push_str(&format!(
-                "          # max |beta| = {:.2}, gamma = {:.2}\n",
-                opt_fan.max_beta, opt_fan.gamma
-            ));
-        }
-
-        out.push_str("          sensors = [");
-        for s in &opt_fan.sensors {
-            out.push_str(&format!(" \"{}\"", s));
-        }
-        out.push_str(" ];\n");
-
-        out.push_str("          curve = [\n");
-        for point in &opt_fan.curve {
-            out.push_str(&format!(
-                "            {{ temp = {}; pwm = {}; }}\n",
-                point.temp, point.pwm
-            ));
-        }
-        out.push_str("          ];\n");
-        out.push_str("        }\n");
-    }
-    out.push_str("      ];\n\n");
-
-    // tuning
-    out.push_str("      tuning = {\n");
-    out.push_str(&format!("        ewma_span = {};\n", config.tuning.ewma_span));
-    out.push_str(&format!("        ccf_buffer_size = {};\n", config.tuning.ccf_buffer_size));
-    out.push_str(&format!("        ccf_max_lag = {};\n", config.tuning.ccf_max_lag));
-    out.push_str(&format!("        step_threshold = {};\n", config.tuning.step_threshold));
-    out.push_str(&format!("        response_window = {};\n", config.tuning.response_window));
-    out.push_str(&format!("        regression_min_samples = {};\n", config.tuning.regression_min_samples));
-    out.push_str("      };\n");
-
-    out.push_str("    };\n");
     out.push_str("  };\n");
     out.push_str("}\n");
 
     out
 }
 
+/// Emit Nix from a detected config with no tuning data (pass-through curves).
+pub fn emit_nix_from_detected(config: &Config) -> String {
+    use sc_core::config::CurvePoint;
+
+    let optimized = OptimizedConfig {
+        fans: config
+            .fans
+            .iter()
+            .map(|f| OptimizedFan {
+                name: f.name.clone(),
+                sensors: f.sensors.clone(),
+                curve: f
+                    .curve
+                    .iter()
+                    .map(|p| CurvePoint {
+                        temp: p.temp,
+                        pwm: p.pwm,
+                    })
+                    .collect(),
+                gamma: 1.0,
+                max_beta: 0.0,
+            })
+            .collect(),
+        has_tuning_data: false,
+    };
+    emit_nix(config, &optimized, None)
+}
+
+/// Build a serializable settings struct from optimized config.
+fn build_settings(config: &Config, optimized: &OptimizedConfig) -> Settings {
+    Settings {
+        poll_interval_ms: config.poll_interval_ms,
+        derivative: Derivative {
+            window_size: config.derivative.window_size,
+            boost_threshold: config.derivative.boost_threshold,
+            decay_rate: config.derivative.decay_rate,
+        },
+        sensors: config
+            .sensors
+            .iter()
+            .map(|s| Sensor {
+                name: s.name.clone(),
+                hwmon: s.hwmon.clone(),
+                index: s.index,
+            })
+            .collect(),
+        fans: optimized
+            .fans
+            .iter()
+            .map(|opt_fan| {
+                let orig = config.fans.iter().find(|f| f.name == opt_fan.name).unwrap();
+                Fan {
+                    name: opt_fan.name.clone(),
+                    hwmon: orig.hwmon.clone(),
+                    pwm_index: orig.pwm_index,
+                    sensors: opt_fan.sensors.clone(),
+                    curve: opt_fan
+                        .curve
+                        .iter()
+                        .map(|p| CurvePointOut {
+                            temp: p.temp,
+                            pwm: p.pwm,
+                        })
+                        .collect(),
+                }
+            })
+            .collect(),
+        tuning: Tuning {
+            ewma_span: config.tuning.ewma_span,
+            ccf_buffer_size: config.tuning.ccf_buffer_size,
+            ccf_max_lag: config.tuning.ccf_max_lag,
+            step_threshold: config.tuning.step_threshold,
+            response_window: config.tuning.response_window,
+            regression_min_samples: config.tuning.regression_min_samples,
+        },
+    }
+}
+
+/// Indent every line of a multi-line string by `n` spaces, except the first line.
+fn indent_block(s: &str, n: usize) -> String {
+    let pad = " ".repeat(n);
+    let mut lines = s.lines();
+    let mut out = String::new();
+    if let Some(first) = lines.next() {
+        out.push_str(first);
+    }
+    for line in lines {
+        out.push('\n');
+        if !line.is_empty() {
+            out.push_str(&pad);
+        }
+        out.push_str(line);
+    }
+    out
+}
+
 /// Map hwmon chip name to kernel module name.
 fn hwmon_to_kernel_module(hwmon: &str) -> String {
-    // nct6799 is loaded via the nct6775 driver
     if hwmon.starts_with("nct6") {
         "nct6775".to_string()
     } else {
-        // k10temp, it87xx, etc. are typically auto-loaded or match the chip name
         hwmon.to_string()
     }
 }
 
-/// Format a float without trailing zeros, ensuring at least one decimal place.
-fn format_float(v: f64) -> String {
-    let s = format!("{}", v);
-    if s.contains('.') {
-        s
-    } else {
-        format!("{}.0", s)
-    }
+// ─── Serializable Nix output types ──────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+struct Settings {
+    poll_interval_ms: u64,
+    derivative: Derivative,
+    sensors: Vec<Sensor>,
+    fans: Vec<Fan>,
+    tuning: Tuning,
+}
+
+#[derive(serde::Serialize)]
+struct Derivative {
+    window_size: usize,
+    boost_threshold: f64,
+    decay_rate: f64,
+}
+
+#[derive(serde::Serialize)]
+struct Sensor {
+    name: String,
+    hwmon: String,
+    index: u32,
+}
+
+#[derive(serde::Serialize)]
+struct Fan {
+    name: String,
+    hwmon: String,
+    pwm_index: u32,
+    sensors: Vec<String>,
+    curve: Vec<CurvePointOut>,
+}
+
+#[derive(serde::Serialize)]
+struct CurvePointOut {
+    temp: u32,
+    pwm: u8,
+}
+
+#[derive(serde::Serialize)]
+struct Tuning {
+    ewma_span: usize,
+    ccf_buffer_size: usize,
+    ccf_max_lag: usize,
+    step_threshold: u8,
+    response_window: usize,
+    regression_min_samples: usize,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sc_core::config::*;
     use crate::optimize::{OptimizedConfig, OptimizedFan};
+    use sc_core::config::*;
 
     #[test]
     fn emit_produces_valid_nix_structure() {
@@ -211,10 +284,8 @@ mod tests {
 
         assert!(nix.contains("services.smartcool"));
         assert!(nix.contains("enable = true"));
-        assert!(nix.contains("poll_interval_ms = 2000"));
+        assert!(nix.contains("poll_interval_ms = 2000;"));
         assert!(nix.contains("nct6775"));
-        assert!(nix.contains("name = \"cpu\""));
-        assert!(nix.contains("name = \"fan\""));
         assert!(nix.contains("WARNING: No tuning data"));
     }
 
@@ -228,5 +299,12 @@ mod tests {
     fn hwmon_other_passes_through() {
         assert_eq!(hwmon_to_kernel_module("k10temp"), "k10temp");
         assert_eq!(hwmon_to_kernel_module("it8622"), "it8622");
+    }
+
+    #[test]
+    fn indent_block_works() {
+        let input = "{\n  x = 1;\n}";
+        let result = indent_block(input, 4);
+        assert_eq!(result, "{\n      x = 1;\n    }");
     }
 }

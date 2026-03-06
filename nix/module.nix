@@ -1,3 +1,4 @@
+{ ronixLib }:
 {
   config,
   lib,
@@ -6,7 +7,6 @@
 }:
 let
   cfg = config.services.smartcool;
-  ronLib = import ./ron.nix { inherit lib; };
 in
 {
   options.services.smartcool = {
@@ -22,7 +22,7 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    environment.etc."smartcool/config.ron".text = ronLib.toRON cfg.settings;
+    environment.etc."smartcool/config.ron".text = ronixLib.toRON 0 cfg.settings;
 
     systemd.services.smartcool = {
       description = "SmartCool fan control daemon";

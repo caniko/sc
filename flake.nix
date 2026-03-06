@@ -4,6 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     crane.url = "github:ipetkov/crane";
+    ronix.url = "git+https://codeberg.org/caniko/ronix.git";
   };
 
   outputs =
@@ -11,6 +12,7 @@
       self,
       nixpkgs,
       crane,
+      ronix,
       ...
     }:
     let
@@ -85,6 +87,6 @@
         }
       );
 
-      nixosModules.default = import ./nix/module.nix;
+      nixosModules.default = import ./nix/module.nix { ronixLib = ronix.lib; };
     };
 }

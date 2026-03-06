@@ -1,0 +1,8 @@
+[package]
+name = "sc-detect"
+version = "0.1.0"
+edition = "2021"
+description = "Hardware discovery for SmartCool — hwmon chip enumeration, sensor/fan detection"
+
+[dependencies]
+anyhow = "1"

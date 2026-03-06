@@ -1,7 +1,14 @@
 [workspace]
 members = [
     "crates/sc-core",
+    "crates/sc-detect",
     "crates/sc",
     "crates/sc-nixgen",
 ]
 resolver = "2"
+
+[workspace.metadata.crane]
+name = "smartcool"
+
+[workspace.package]
+version = "0.1.0"
