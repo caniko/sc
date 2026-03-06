@@ -1,6 +1,5 @@
 mod controller;
 mod display;
-mod hwmon;
 mod ipc_server;
 mod thermal;
 

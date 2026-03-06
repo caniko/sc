@@ -42,6 +42,8 @@ pub struct HwmonChip {
 pub struct DetectedSensor {
     pub auto_name: String,
     pub hwmon_chip: String,
+    /// Exact sysfs hwmon path (e.g. /sys/class/hwmon/hwmon3)
+    pub hwmon_path: PathBuf,
     pub index: u32,
     pub label: Option<String>,
     pub current_temp_c: f64,
@@ -52,6 +54,8 @@ pub struct DetectedSensor {
 pub struct DetectedFan {
     pub auto_name: String,
     pub hwmon_chip: String,
+    /// Exact sysfs hwmon path (e.g. /sys/class/hwmon/hwmon3)
+    pub hwmon_path: PathBuf,
     pub pwm_index: u32,
     pub current_rpm: Option<u32>,
 }
@@ -204,6 +208,7 @@ pub fn discover_sensors(chips: &[HwmonChip], include_ec: bool) -> Result<Vec<Det
             sensors.push(DetectedSensor {
                 auto_name,
                 hwmon_chip: chip.name.clone(),
+                hwmon_path: chip.path.clone(),
                 index,
                 label,
                 current_temp_c: temp_c,
@@ -226,6 +231,17 @@ pub fn discover_fans(chips: &[HwmonChip]) -> Result<Vec<DetectedFan>> {
     let mut gpu_fan_index = 0u32;
 
     for chip in chips {
+        // Skip iGPUs: when multiple GPU chips exist, skip any that lack fan/PWM
+        // hardware (iGPUs sit on the CPU die and have no fan).
+        if chip.class == ChipClass::GpuTemp && gpu_chip_count > 1 {
+            let has_fan_hw = (1..=MAX_PWM_INDEX).any(|i| {
+                chip.path.join(format!("fan{}_input", i)).exists()
+            });
+            if !has_fan_hw {
+                continue;
+            }
+        }
+
         for pwm_index in 1..=MAX_PWM_INDEX {
             let pwm_path = chip.path.join(format!("pwm{}", pwm_index));
             if !pwm_path.exists() {
@@ -253,6 +269,7 @@ pub fn discover_fans(chips: &[HwmonChip]) -> Result<Vec<DetectedFan>> {
             fans.push(DetectedFan {
                 auto_name,
                 hwmon_chip: chip.name.clone(),
+                hwmon_path: chip.path.clone(),
                 pwm_index,
                 current_rpm,
             });

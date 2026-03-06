@@ -11,8 +11,10 @@ path = "src/main.rs"
 [dependencies]
 sc-core = { path = "../sc-core" }
 sc-detect = { path = "../sc-detect" }
+sc-hwmon = { path = "../sc-hwmon" }
 ronix = "0.1"
 clap = { version = "4", features = ["derive"] }
 ron = "0.9"
 serde = { version = "1", features = ["derive"] }
 anyhow = "1"
+serde_yaml = "0.9"

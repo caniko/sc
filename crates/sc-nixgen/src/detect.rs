@@ -3,7 +3,10 @@
 //! Owns the policy decisions: default curves, fan-to-sensor mapping heuristics,
 //! and derivative/tuning defaults.
 
-use sc_core::config::{Config, CurvePoint, DerivativeConfig, FanConfig, SensorConfig};
+use sc_core::config::{
+    AirflowDirection, Config, CurvePoint, DerivativeConfig, FanConfig, FanPosition, FanTopology,
+    SensorConfig,
+};
 use sc_detect::{ChipClass, DetectedFan, DetectedSensor, DetectionResult};
 
 // ─── Default Curves ──────────────────────────────────────────────────────────
@@ -39,6 +42,10 @@ const CASE_CURVE: &[(u32, u8)] = &[
 
 /// Build a complete SmartCool Config from detection results.
 pub fn build_config(result: &DetectionResult) -> Config {
+    // Build a map of chip_name -> sorted list of hwmon paths, so we can compute
+    // hwmon_instance indices for disambiguation.
+    let instance_map = build_instance_map(result);
+
     let sensors: Vec<SensorConfig> = result
         .sensors
         .iter()
@@ -46,6 +53,7 @@ pub fn build_config(result: &DetectionResult) -> Config {
             name: s.auto_name.clone(),
             hwmon: s.hwmon_chip.clone(),
             index: s.index,
+            hwmon_instance: hwmon_instance_for(&instance_map, &s.hwmon_chip, &s.hwmon_path),
         })
         .collect();
 
@@ -61,6 +69,8 @@ pub fn build_config(result: &DetectionResult) -> Config {
                 name: fan.auto_name.clone(),
                 hwmon: fan.hwmon_chip.clone(),
                 pwm_index: fan.pwm_index,
+                hwmon_instance: hwmon_instance_for(&instance_map, &fan.hwmon_chip, &fan.hwmon_path),
+                topology: infer_topology(fan),
                 sensors: mapped_sensors.iter().map(|s| s.auto_name.clone()).collect(),
                 curve,
             }
@@ -139,6 +149,39 @@ pub fn print_summary(result: &DetectionResult) {
 
 // ─── Internal ────────────────────────────────────────────────────────────────
 
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+/// Build a map of chip_name -> sorted vec of unique hwmon paths.
+fn build_instance_map(result: &DetectionResult) -> HashMap<String, Vec<PathBuf>> {
+    let mut map: HashMap<String, Vec<PathBuf>> = HashMap::new();
+
+    for chip in &result.chips {
+        let paths = map.entry(chip.name.clone()).or_default();
+        if !paths.contains(&chip.path) {
+            paths.push(chip.path.clone());
+        }
+    }
+
+    for paths in map.values_mut() {
+        paths.sort();
+    }
+    map
+}
+
+/// Return `Some(index)` when a chip name has multiple hwmon instances, `None` if unique.
+fn hwmon_instance_for(
+    map: &HashMap<String, Vec<PathBuf>>,
+    chip_name: &str,
+    hwmon_path: &Path,
+) -> Option<u32> {
+    let paths = map.get(chip_name)?;
+    if paths.len() <= 1 {
+        return None; // unique chip, no disambiguation needed
+    }
+    paths.iter().position(|p| p == hwmon_path).map(|i| i as u32)
+}
+
 /// Map each fan to the sensors it should respond to.
 fn map_fans_to_sensors<'a>(
     sensors: &'a [DetectedSensor],
@@ -189,6 +232,25 @@ fn map_fans_to_sensors<'a>(
         .collect()
 }
 
+/// Infer fan topology from the chip class.
+/// GPU fans → gpu_cooler/exhaust, EC fans → front/intake as a safe default.
+/// Users are expected to correct these in the generated config.
+fn infer_topology(fan: &DetectedFan) -> FanTopology {
+    let fan_class = sc_detect::classify_chip(&fan.hwmon_chip);
+    match fan_class {
+        ChipClass::GpuTemp => FanTopology {
+            position: FanPosition::GpuCooler,
+            direction: AirflowDirection::Exhaust,
+            group: None,
+        },
+        _ => FanTopology {
+            position: FanPosition::Front,
+            direction: AirflowDirection::Intake,
+            group: None,
+        },
+    }
+}
+
 /// Select the appropriate default curve based on fan context.
 fn select_curve(fan: &DetectedFan, mapped_sensors: &[&DetectedSensor]) -> Vec<CurvePoint> {
     let fan_class = sc_detect::classify_chip(&fan.hwmon_chip);
@@ -228,6 +290,7 @@ mod tests {
         DetectedSensor {
             auto_name: "cpu".into(),
             hwmon_chip: "k10temp".into(),
+            hwmon_path: PathBuf::from("/sys/class/hwmon/hwmon0"),
             index: 1,
             label: Some("Tctl".into()),
             current_temp_c: 45.0,
@@ -238,6 +301,7 @@ mod tests {
         DetectedSensor {
             auto_name: "gpu".into(),
             hwmon_chip: "amdgpu".into(),
+            hwmon_path: PathBuf::from("/sys/class/hwmon/hwmon1"),
             index: 1,
             label: Some("edge".into()),
             current_temp_c: 38.0,
@@ -248,6 +312,7 @@ mod tests {
         DetectedFan {
             auto_name: "fan1".into(),
             hwmon_chip: "nct6799".into(),
+            hwmon_path: PathBuf::from("/sys/class/hwmon/hwmon2"),
             pwm_index: 1,
             current_rpm: Some(800),
         }
@@ -257,6 +322,7 @@ mod tests {
         DetectedFan {
             auto_name: "gpu_fan".into(),
             hwmon_chip: "amdgpu".into(),
+            hwmon_path: PathBuf::from("/sys/class/hwmon/hwmon1"),
             pwm_index: 1,
             current_rpm: Some(1200),
         }

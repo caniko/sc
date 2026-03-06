@@ -1,0 +1,9 @@
+[package]
+name = "sc-hwmon"
+version = "0.1.0"
+edition = "2021"
+description = "Sysfs hwmon interface — fan PWM control and temperature sensor reading"
+
+[dependencies]
+anyhow = "1"
+tracing = "0.1"

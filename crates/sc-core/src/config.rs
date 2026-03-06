@@ -71,6 +71,45 @@ pub struct SensorConfig {
     pub hwmon: String,
     /// Temperature sensor index (e.g. 1 → temp1_input)
     pub index: u32,
+    /// When multiple hwmon chips share the same name (e.g. two "amdgpu" for
+    /// iGPU + dGPU), this 0-based instance index selects which one to use.
+    /// Defaults to 0 (first match). Ordered by sysfs hwmon number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hwmon_instance: Option<u32>,
+}
+
+/// Physical location of a fan in the case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FanPosition {
+    Front,
+    Rear,
+    Top,
+    Bottom,
+    Side,
+    CpuCooler,
+    GpuCooler,
+}
+
+/// Direction of airflow relative to the case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AirflowDirection {
+    /// Pulling cool air into the case
+    Intake,
+    /// Pushing hot air out of the case
+    Exhaust,
+}
+
+/// Physical topology of a fan — where it sits and which way it blows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FanTopology {
+    pub position: FanPosition,
+    pub direction: AirflowDirection,
+    /// Optional group name — fans in the same group are benchmarked and
+    /// controlled together (e.g. "front_intake", "top_exhaust").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -80,6 +119,12 @@ pub struct FanConfig {
     pub hwmon: String,
     /// PWM channel index (e.g. 2 → pwm2)
     pub pwm_index: u32,
+    /// When multiple hwmon chips share the same name, this 0-based instance
+    /// index selects which one to use. Defaults to 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hwmon_instance: Option<u32>,
+    /// Physical topology — position, airflow direction, group membership
+    pub topology: FanTopology,
     /// Names of sensors that drive this fan
     pub sensors: Vec<String>,
     /// Temperature-to-PWM curve points (must be sorted by temp ascending)
@@ -188,6 +233,12 @@ mod tests {
             name: "test".into(),
             hwmon: "nct6799".into(),
             pwm_index: 1,
+            hwmon_instance: None,
+            topology: FanTopology {
+                position: FanPosition::Front,
+                direction: AirflowDirection::Intake,
+                group: None,
+            },
             sensors: vec!["cpu".into()],
             curve: vec![
                 CurvePoint { temp: 45, pwm: 20 },
@@ -242,6 +293,10 @@ mod tests {
                         name: "test",
                         hwmon: "nct6799",
                         pwm_index: 1,
+                        topology: FanTopology(
+                            position: cpu_cooler,
+                            direction: exhaust,
+                        ),
                         sensors: ["cpu"],
                         curve: [
                             CurvePoint(temp: 45, pwm: 20),

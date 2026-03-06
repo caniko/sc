@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use sc_core::config::Config;
 use sc_core::ipc;
-use crate::hwmon::{fan::Fan, sensor::Sensor};
+use sc_hwmon::{fan::Fan, sensor::Sensor};
 use crate::thermal::{analytics::AnalyticsTracker, derivative::DerivativeTracker, tuning::{ThermalSystem, TuningParams}};
 
 /// Number of analytics history snapshots to retain per fan.
@@ -33,7 +33,7 @@ pub fn run_daemon(config_path: &Path) -> Result<()> {
     // Resolve sensors
     let mut sensors: Vec<(Sensor, DerivativeTracker)> = Vec::new();
     for sc in &config.sensors {
-        let sensor = Sensor::from_config(&sc.name, &sc.hwmon, sc.index)
+        let sensor = Sensor::from_config(&sc.name, &sc.hwmon, sc.index, sc.hwmon_instance)
             .with_context(|| format!("failed to initialize sensor '{}'", sc.name))?;
         let tracker = DerivativeTracker::new(config.derivative.window_size);
         tracing::info!(
@@ -48,7 +48,7 @@ pub fn run_daemon(config_path: &Path) -> Result<()> {
     // Resolve fans and set to manual mode
     let mut managed_fans: Vec<ManagedFan> = Vec::new();
     for (i, fc) in config.fans.iter().enumerate() {
-        let fan = Fan::from_config(&fc.name, &fc.hwmon, fc.pwm_index)
+        let fan = Fan::from_config(&fc.name, &fc.hwmon, fc.pwm_index, fc.hwmon_instance)
             .with_context(|| format!("failed to initialize fan '{}'", fc.name))?;
         fan.set_manual()
             .with_context(|| format!("failed to set fan '{}' to manual mode", fc.name))?;

@@ -87,6 +87,8 @@
         }
       );
 
+      lib = ronix.lib;
+
       nixosModules.default = import ./nix/module.nix { ronixLib = ronix.lib; };
     };
 }

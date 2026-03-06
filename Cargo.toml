@@ -2,6 +2,7 @@
 members = [
     "crates/sc-core",
     "crates/sc-detect",
+    "crates/sc-hwmon",
     "crates/sc",
     "crates/sc-nixgen",
 ]

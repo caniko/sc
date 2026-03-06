@@ -49,7 +49,9 @@ pub fn emit_nix(
         }
     }
 
-    out.push_str("_: {\n");
+    out.push_str("{inputs, ...}: let\n");
+    out.push_str("  inherit (inputs.sc.inputs.ronix.lib) mkRON;\n");
+    out.push_str("in {\n");
 
     // Kernel modules
     if !kernel_modules.is_empty() {
@@ -62,8 +64,11 @@ pub fn emit_nix(
 
     // Build the settings struct and serialize with ronix
     let settings = build_settings(config, optimized);
-    let settings_nix =
+    let mut settings_nix =
         ronix::to_nix(&settings).unwrap_or_else(|e| panic!("ronix serialization failed: {}", e));
+
+    // Wrap topology enum values with mkRON "enum" for correct RON generation
+    settings_nix = wrap_topology_enums(&settings_nix);
 
     out.push_str("  services.smartcool = {\n");
     out.push_str("    enable = true;\n");
@@ -122,6 +127,7 @@ fn build_settings(config: &Config, optimized: &OptimizedConfig) -> Settings {
                 name: s.name.clone(),
                 hwmon: s.hwmon.clone(),
                 index: s.index,
+                hwmon_instance: s.hwmon_instance,
             })
             .collect(),
         fans: optimized
@@ -133,6 +139,8 @@ fn build_settings(config: &Config, optimized: &OptimizedConfig) -> Settings {
                     name: opt_fan.name.clone(),
                     hwmon: orig.hwmon.clone(),
                     pwm_index: orig.pwm_index,
+                    hwmon_instance: orig.hwmon_instance,
+                    topology: orig.topology.clone(),
                     sensors: opt_fan.sensors.clone(),
                     curve: opt_fan
                         .curve
@@ -174,6 +182,29 @@ fn indent_block(s: &str, n: usize) -> String {
     out
 }
 
+/// Wrap topology enum values in the Nix output with `mkRON "enum"` calls.
+/// ronix::to_nix() emits enum variants as quoted strings (e.g. `position = "front";`)
+/// but ronixLib.toRON needs them as `mkRON "enum" "front"` to produce unquoted RON identifiers.
+fn wrap_topology_enums(nix: &str) -> String {
+    let position_values: &[&str] = &[
+        "front", "rear", "top", "bottom", "side", "cpu_cooler", "gpu_cooler",
+    ];
+    let direction_values: &[&str] = &["intake", "exhaust"];
+
+    let mut result = nix.to_string();
+    for val in position_values {
+        let from = format!("position = \"{}\";", val);
+        let to = format!("position = mkRON \"enum\" \"{}\";", val);
+        result = result.replace(&from, &to);
+    }
+    for val in direction_values {
+        let from = format!("direction = \"{}\";", val);
+        let to = format!("direction = mkRON \"enum\" \"{}\";", val);
+        result = result.replace(&from, &to);
+    }
+    result
+}
+
 /// Map hwmon chip name to kernel module name.
 fn hwmon_to_kernel_module(hwmon: &str) -> String {
     if hwmon.starts_with("nct6") {
@@ -206,6 +237,8 @@ struct Sensor {
     name: String,
     hwmon: String,
     index: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hwmon_instance: Option<u32>,
 }
 
 #[derive(serde::Serialize)]
@@ -213,6 +246,9 @@ struct Fan {
     name: String,
     hwmon: String,
     pwm_index: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hwmon_instance: Option<u32>,
+    topology: sc_core::config::FanTopology,
     sensors: Vec<String>,
     curve: Vec<CurvePointOut>,
 }
@@ -252,11 +288,18 @@ mod tests {
                 name: "cpu".into(),
                 hwmon: "k10temp".into(),
                 index: 1,
+                hwmon_instance: None,
             }],
             fans: vec![FanConfig {
                 name: "fan".into(),
                 hwmon: "nct6799".into(),
                 pwm_index: 1,
+                hwmon_instance: None,
+                topology: FanTopology {
+                    position: FanPosition::Front,
+                    direction: AirflowDirection::Intake,
+                    group: None,
+                },
                 sensors: vec!["cpu".into()],
                 curve: vec![
                     CurvePoint { temp: 45, pwm: 20 },
@@ -287,6 +330,9 @@ mod tests {
         assert!(nix.contains("poll_interval_ms = 2000;"));
         assert!(nix.contains("nct6775"));
         assert!(nix.contains("WARNING: No tuning data"));
+        assert!(nix.contains("inherit (inputs.sc.inputs.ronix.lib) mkRON;"));
+        assert!(nix.contains(r#"position = mkRON "enum" "front";"#));
+        assert!(nix.contains(r#"direction = mkRON "enum" "intake";"#));
     }
 
     #[test]
