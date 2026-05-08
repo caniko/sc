@@ -1,22 +1,19 @@
-{ ronixLib }:
-{
+{ronixLib}: {
   config,
   lib,
   pkgs,
   ...
-}:
-let
+}: let
   cfg = config.services.smartcool;
-in
-{
+in {
   options.services.smartcool = {
     enable = lib.mkEnableOption "SmartCool fan control daemon";
 
-    package = lib.mkPackageOption pkgs "smartcool" { };
+    package = lib.mkPackageOption pkgs "smartcool" {};
 
     settings = lib.mkOption {
       type = lib.types.attrs;
-      default = { };
+      default = {};
       description = "SmartCool configuration (serialized to RON)";
     };
   };
@@ -26,8 +23,8 @@ in
 
     systemd.services.smartcool = {
       description = "SmartCool fan control daemon";
-      wantedBy = [ "multi-user.target" ];
-      after = [ "local-fs.target" ];
+      wantedBy = ["multi-user.target"];
+      after = ["local-fs.target"];
       serviceConfig = {
         Type = "notify";
         ExecStart = "${cfg.package}/bin/sc daemon -c /etc/smartcool/config.ron";

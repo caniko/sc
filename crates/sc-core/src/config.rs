@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub poll_interval_ms: u64,
     pub derivative: DerivativeConfig,
@@ -12,7 +12,7 @@ pub struct Config {
     pub tuning: TuningConfig,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TuningConfig {
     /// EWMA smoothing span (samples). Higher = smoother, more lag.
     #[serde(default = "default_ewma_span")]
@@ -54,7 +54,7 @@ fn default_step_threshold() -> u8 { 15 }
 fn default_response_window() -> usize { 60 }
 fn default_regression_min_samples() -> usize { 60 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DerivativeConfig {
     /// Number of samples in the rolling window
     pub window_size: usize,
@@ -64,7 +64,7 @@ pub struct DerivativeConfig {
     pub decay_rate: f64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SensorConfig {
     pub name: String,
     /// hwmon chip name (e.g. "k10temp", "nct6799")
@@ -112,7 +112,7 @@ pub struct FanTopology {
     pub group: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FanConfig {
     pub name: String,
     /// hwmon chip name for the fan controller
@@ -131,7 +131,7 @@ pub struct FanConfig {
     pub curve: Vec<CurvePoint>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CurvePoint {
     /// Temperature threshold in °C
     pub temp: u32,
