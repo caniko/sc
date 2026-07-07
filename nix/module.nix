@@ -165,6 +165,12 @@ in {
         default = "30s";
         description = "systemd OnBootSec delay before the first reassertion.";
       };
+
+      unitName = mkOption {
+        type = types.str;
+        default = "smartcool-firmware-attributes";
+        description = "Base systemd unit name for firmware attribute application.";
+      };
     };
 
     nvidiaClockCap = {
@@ -197,6 +203,12 @@ in {
         type = types.str;
         default = "1min";
         description = "systemd OnBootSec delay before the first clock-cap reassertion.";
+      };
+
+      unitName = mkOption {
+        type = types.str;
+        default = "smartcool-nvidia-clock-cap";
+        description = "Base systemd unit name for the NVIDIA clock-cap lifecycle service and timer.";
       };
     };
 
@@ -254,7 +266,7 @@ in {
         }
       ];
 
-      systemd.services.smartcool-firmware-attributes = {
+      systemd.services.${firmwareCfg.unitName} = {
         description = "Apply SmartCool firmware attributes";
         wantedBy = ["multi-user.target"];
         after = ["systemd-modules-load.service"];
@@ -264,14 +276,14 @@ in {
         };
       };
 
-      systemd.timers.smartcool-firmware-attributes = {
+      systemd.timers.${firmwareCfg.unitName} = {
         description = "Periodically reassert SmartCool firmware attributes";
         wantedBy = ["timers.target"];
         timerConfig = {
           OnBootSec = firmwareCfg.onBootSec;
           OnUnitActiveSec = firmwareCfg.reassertInterval;
           AccuracySec = "5s";
-          Unit = "smartcool-firmware-attributes.service";
+          Unit = "${firmwareCfg.unitName}.service";
         };
       };
     })
@@ -284,7 +296,7 @@ in {
         }
       ];
 
-      systemd.services.smartcool-nvidia-clock-cap = {
+      systemd.services.${nvidiaCfg.unitName} = {
         description = "Apply SmartCool NVIDIA graphics clock cap";
         wantedBy = ["multi-user.target"];
         after = ["nvidia-persistenced.service"];
@@ -298,7 +310,7 @@ in {
         };
       };
 
-      systemd.services.smartcool-nvidia-clock-cap-reassert = {
+      systemd.services.${nvidiaCfg.unitName + "-reassert"} = {
         description = "Reassert SmartCool NVIDIA graphics clock cap";
         after = ["nvidia-persistenced.service"];
         requires = ["nvidia-persistenced.service"];
@@ -308,14 +320,14 @@ in {
         };
       };
 
-      systemd.timers.smartcool-nvidia-clock-cap = {
+      systemd.timers.${nvidiaCfg.unitName} = {
         description = "Periodically reassert SmartCool NVIDIA graphics clock cap";
         wantedBy = ["timers.target"];
         timerConfig = {
           OnBootSec = nvidiaCfg.onBootSec;
           OnUnitActiveSec = nvidiaCfg.reassertInterval;
           AccuracySec = "1s";
-          Unit = "smartcool-nvidia-clock-cap-reassert.service";
+          Unit = "${nvidiaCfg.unitName}-reassert.service";
         };
       };
     })
