@@ -1,0 +1,78 @@
+[site]
+title = "SmartCool"
+description = "Intelligent fan control daemon with derivative tracking and cooling analytics."
+base_url = "/sc/"
+footer_note = "SmartCool is maintained from its Codeberg source repository."
+
+[theme]
+paper = "#F8FAFC"
+surface = "#FFFFFF"
+ink = "#17202A"
+ink_soft = "#5B6776"
+line = "rgba(23, 32, 42, 0.14)"
+accent = "#0F766E"
+accent_soft = "#CCFBF1"
+secondary = "#7C3AED"
+warning = "#B45309"
+rust = "#B7410E"
+
+[[nav]]
+label = "Overview"
+href = "#overview"
+
+[[nav]]
+label = "Docs"
+href = "/sc/docs/"
+
+[[nav]]
+label = "Source"
+href = "https://codeberg.org/caniko/sc"
+
+[[pages]]
+slug = "index"
+title = "SmartCool"
+description = "Intelligent fan control daemon with derivative tracking and cooling analytics."
+
+[[pages.sections]]
+type = "hero"
+title = "SmartCool"
+tagline = "NixOS-oriented fan control for hwmon systems."
+subtitle = "SmartCool runs a Linux fan control daemon, reads configured hwmon sensors, drives PWM fan curves, adds derivative-based thermal boosts, and reports status, analytics, and tuning data over a local Unix socket."
+
+[[pages.sections.ctas]]
+label = "Read the docs"
+href = "/sc/docs/"
+primary = true
+
+[[pages.sections.ctas]]
+label = "View source"
+href = "https://codeberg.org/caniko/sc"
+
+[[pages.sections]]
+type = "feature_grid"
+id = "overview"
+
+[[pages.sections.features]]
+title = "Daemon and CLI"
+description = "The sc binary runs the SmartCool daemon, validates RON configuration, and queries status, analytics, and tuning data from /run/smartcool/sc.sock."
+highlight = true
+
+[[pages.sections.features]]
+title = "NixOS module"
+description = "The flake exposes a services.smartcool module that serializes settings to /etc/smartcool/config.ron and runs the daemon under systemd."
+
+[[pages.sections.features]]
+title = "Hardware detection"
+description = "sc-nixgen scans /sys/class/hwmon for CPU, GPU, embedded-controller, and PWM fan channels, then emits starter NixOS configuration."
+
+[[pages.sections.features]]
+title = "Thermal behavior"
+description = "Fan targets combine configured temperature curves with derivative-based boost and decay behavior for rising or falling temperatures."
+
+[[pages.sections.features]]
+title = "Cooling analytics"
+description = "The daemon records fan PWM, RPM, sensor temperatures, effectiveness estimates, coupling data, step responses, cross-correlations, and thermal integrals."
+
+[[pages.sections.features]]
+title = "Reproducible outputs"
+description = "The repository builds Rust packages, documentation, and this combined Codeberg Pages site through Nix flake outputs."

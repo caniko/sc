@@ -5,6 +5,13 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     crane.url = "github:ipetkov/crane";
     ronix.url = "git+https://codeberg.org/caniko/ronix.git";
+    nix-pklx.url = "git+https://codeberg.org/caniko/nix-pklx.git";
+    plinth = {
+      url = "git+https://codeberg.org/caniko/plinth";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.crane.follows = "crane";
+      inputs.rust-overlay.follows = "rust-overlay";
+    };
 
     rs-harbor = {
       url = "git+ssh://git@codeberg.org/caniko/rs-harbor.git?ref=trunk";
@@ -22,6 +29,7 @@
     self,
     nixpkgs,
     ronix,
+    plinth,
     rs-harbor,
     rust-overlay,
     ...
@@ -54,10 +62,10 @@
       craneLib = toolchain.craneLib;
       nativeBuildInputs = harbor.mkRustNativeBuildInputs {
         inherit pkgs;
-        extra = [pkgs.pkg-config pkgs.sccache];
+        extra = [pkgs.pkg-config];
       };
       sccacheEnv = harbor.mkSccacheCraneEnv {
-        enable = true;
+        enable = false;
         package = "${pkgs.sccache}/bin/sccache";
       };
       commonArgs =
@@ -66,6 +74,7 @@
           strictDeps = true;
           pname = "smartcool";
           version = "0.1.0";
+          SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
           inherit nativeBuildInputs;
         }
         // sccacheEnv;
@@ -78,9 +87,51 @@
             cargoExtraArgs = "--package ${package}";
           }
         );
+      docs = pkgs.stdenvNoCC.mkDerivation {
+        pname = "smartcool-docs";
+        version = "0.1.0";
+        src = nixpkgs.lib.fileset.toSource {
+          root = ./.;
+          fileset = nixpkgs.lib.fileset.maybeMissing ./docs;
+        };
+        nativeBuildInputs = [pkgs.mdbook];
+        phases = ["buildPhase" "installPhase"];
+        buildPhase = ''
+          cp -r --no-preserve=mode $src/docs docs
+          mdbook build docs
+        '';
+        installPhase = ''
+          cp -r docs/book $out
+        '';
+      };
+      plinthProject = plinth.packages.${system}.plinth-project;
+      projectSite = pkgs.stdenvNoCC.mkDerivation {
+        pname = "smartcool-site";
+        version = "0.1.0";
+        src = nixpkgs.lib.fileset.toSource {
+          root = ./.;
+          fileset = nixpkgs.lib.fileset.unions [
+            (nixpkgs.lib.fileset.maybeMissing ./website)
+          ];
+        };
+        nativeBuildInputs = [plinthProject];
+        phases = ["buildPhase" "installPhase"];
+        buildPhase = ''
+          cp -r --no-preserve=mode $src/website website
+          plinth-project build --config website/plinth-project.toml --out public
+        '';
+        installPhase = ''
+          mkdir -p $out
+          cp -r public/. $out/
+          mkdir -p $out/docs
+          cp -r ${docs}/. $out/docs/
+        '';
+      };
     in rec {
       smartcool = buildPackage "smartcool";
       sc-nixgen = buildPackage "sc-nixgen";
+      inherit docs;
+      site = projectSite;
       default = smartcool;
     };
 
@@ -92,10 +143,10 @@
       packages = mkPackages system;
       nativeBuildInputs = harbor.mkRustNativeBuildInputs {
         inherit pkgs;
-        extra = [pkgs.pkg-config pkgs.sccache];
+        extra = [pkgs.pkg-config];
       };
       sccacheEnv = harbor.mkSccacheCraneEnv {
-        enable = true;
+        enable = false;
         package = "${pkgs.sccache}/bin/sccache";
       };
       commonArgs =
@@ -104,6 +155,7 @@
           strictDeps = true;
           pname = "smartcool";
           version = "0.1.0";
+          SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
           inherit nativeBuildInputs;
         }
         // sccacheEnv;
@@ -113,9 +165,42 @@
         smartcoolModule = self.nixosModules.default;
         package = packages.smartcool;
       };
+      pklValidate = pkgs.runCommand "pkl-validate" {
+        src = ./.;
+        buildInputs = [
+          inputs.nix-pklx.packages.${system}.pklx
+          pkgs.cacert
+          pkgs.coreutils
+          pkgs.findutils
+        ];
+        SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+      } ''
+        cd "$src"
+        failures=0
+        while IFS= read -r file; do
+          echo "validating: $file"
+          tmp="$(mktemp)"
+          if ! pklx eval "$file" -o "$tmp" >/dev/null 2>&1; then
+            echo "FAIL: $file" >&2
+            failures=$((failures + 1))
+          fi
+          rm -f "$tmp"
+        done < <(find . \
+          -path ./target -prune -o \
+          -path ./.git -prune -o \
+          -name '*.pkl' -type f -print | sort)
+
+        if [ "$failures" -gt 0 ]; then
+          echo "ERROR: $failures Pkl file(s) failed validation" >&2
+          exit 1
+        fi
+
+        touch "$out"
+      '';
     in
       {
         inherit (packages) smartcool sc-nixgen;
+        pkl-validate = pklValidate;
         cargo-test = craneLib.cargoTest (commonArgs // {cargoArtifacts = null;});
         cargo-clippy = craneLib.cargoClippy (
           commonArgs
@@ -144,12 +229,16 @@
         inherit pkgs;
         channel = "nightly";
       };
+      plinthProject = plinth.packages.${system}.plinth-project;
     in
       harbor.mkDevShells {
         inherit pkgs cross cargoConfig;
         inherit (toolchain) craneLib;
         enableOsxcrossEnv = false;
         packages = [
+          inputs.nix-pklx.packages.${system}.pklx
+          pkgs.mdbook
+          plinthProject
           self.packages.${system}.sc-nixgen
         ];
       });
