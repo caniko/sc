@@ -1,0 +1,34 @@
+amends "../pkl/SmartCoolConfig.pkl"
+
+poll_interval_ms = 2000
+
+derivative = new {
+  window_size = 10
+  boost_threshold = 2.0
+  decay_rate = 0.5
+}
+
+sensors = new Listing {
+  new {
+    name = "cpu"
+    hwmon = "k10temp"
+    index = 1
+  }
+}
+
+fans = new Listing {
+  new {
+    name = "cpu_fan"
+    hwmon = "nct6799"
+    pwm_index = 1
+    topology = new {
+      position = "cpu_cooler"
+      direction = "exhaust"
+    }
+    sensors = new Listing { "cpu" }
+    curve = new Listing {
+      new { temp = 45; pwm = 20 }
+      new { temp = 85; pwm = 200 }
+    }
+  }
+}

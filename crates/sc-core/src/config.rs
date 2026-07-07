@@ -189,14 +189,28 @@ impl FanConfig {
 }
 
 pub fn load(path: &Path) -> Result<Config> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read config file: {}", path.display()))?;
-
-    let config: Config = ron::from_str(&content)
-        .with_context(|| format!("failed to parse RON config: {}", path.display()))?;
+    let config: Config = load_pkl(path)
+        .with_context(|| format!("failed to evaluate Pkl config: {}", path.display()))?;
 
     validate(&config)?;
     Ok(config)
+}
+
+fn load_pkl<T>(path: &Path) -> Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("create Pkl evaluation runtime")?;
+
+    runtime
+        .block_on(pklx::eval_to_typed(
+            path,
+            pklx::pklr::EvalOptions::default(),
+        ))
+        .map_err(|e| anyhow::anyhow!("failed to evaluate Pkl {}: {}", path.display(), e))
 }
 
 fn validate(config: &Config) -> Result<()> {
@@ -291,40 +305,82 @@ mod tests {
     }
 
     #[test]
-    fn parse_ron_config() {
-        let ron_str = r#"
-            Config(
-                poll_interval_ms: 2000,
-                derivative: DerivativeConfig(
-                    window_size: 10,
-                    boost_threshold: 2.0,
-                    decay_rate: 0.5,
-                ),
-                sensors: [
-                    SensorConfig(name: "cpu", hwmon: "k10temp", index: 1),
-                ],
-                fans: [
-                    FanConfig(
-                        name: "test",
-                        hwmon: "nct6799",
-                        pwm_index: 1,
-                        topology: FanTopology(
-                            position: cpu_cooler,
-                            direction: exhaust,
-                        ),
-                        sensors: ["cpu"],
-                        curve: [
-                            CurvePoint(temp: 45, pwm: 20),
-                            CurvePoint(temp: 85, pwm: 200),
-                        ],
-                    ),
-                ],
-            )
-        "#;
+    fn parse_pkl_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.pkl");
+        std::fs::write(
+            &path,
+            r#"
+poll_interval_ms = 2000
+derivative = new {
+  window_size = 10
+  boost_threshold = 2.0
+  decay_rate = 0.5
+}
+sensors = new Listing {
+  new {
+    name = "cpu"
+    hwmon = "k10temp"
+    index = 1
+  }
+}
+fans = new Listing {
+  new {
+    name = "test"
+    hwmon = "nct6799"
+    pwm_index = 1
+    topology = new {
+      position = "cpu_cooler"
+      direction = "exhaust"
+    }
+    sensors = new Listing { "cpu" }
+    curve = new Listing {
+      new { temp = 45; pwm = 20 }
+      new { temp = 85; pwm = 200 }
+    }
+  }
+}
+"#,
+        )
+        .unwrap();
 
-        let config: Config = ron::from_str(ron_str).unwrap();
+        let config = load(&path).unwrap();
         assert_eq!(config.sensors.len(), 1);
         assert_eq!(config.fans.len(), 1);
         assert_eq!(config.fans[0].curve.len(), 2);
+    }
+
+    #[test]
+    fn invalid_pkl_error_mentions_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid.pkl");
+        std::fs::write(&path, "not valid pkl =").unwrap();
+
+        let err = load(&path).unwrap_err().to_string();
+        assert!(err.contains("failed to evaluate Pkl config"));
+        assert!(err.contains("invalid.pkl"));
+    }
+
+    #[test]
+    fn pkl_config_still_requires_sensors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing-sensors.pkl");
+        std::fs::write(
+            &path,
+            r#"
+poll_interval_ms = 2000
+derivative = new {
+  window_size = 10
+  boost_threshold = 2.0
+  decay_rate = 0.5
+}
+sensors = new Listing {}
+fans = new Listing {}
+"#,
+        )
+        .unwrap();
+
+        let err = load(&path).unwrap_err().to_string();
+        assert!(err.contains("at least one sensor is required"));
     }
 }

@@ -19,8 +19,6 @@ edition = "2021"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 pklx = { git = "https://codeberg.org/caniko/nix-pklx.git" }
-ron = "0.12"
-ronix = "0.1"
 sc-core = { path = "crates/sc-core" }
 sc-detect = { path = "crates/sc-detect" }
 sc-hwmon = { path = "crates/sc-hwmon" }

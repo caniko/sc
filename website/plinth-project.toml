@@ -54,12 +54,12 @@ id = "overview"
 
 [[pages.sections.features]]
 title = "Daemon and CLI"
-description = "The sc binary runs the SmartCool daemon, validates RON configuration, and queries status, analytics, and tuning data from /run/smartcool/sc.sock."
+description = "The sc binary runs the SmartCool daemon, validates Pkl configuration, and queries status, analytics, and tuning data from /run/smartcool/sc.sock."
 highlight = true
 
 [[pages.sections.features]]
 title = "NixOS module"
-description = "The flake exposes a services.smartcool module that serializes settings to /etc/smartcool/config.ron and runs the daemon under systemd."
+description = "The flake exposes a services.smartcool module that serializes settings to /etc/smartcool/config.pkl and runs the daemon under systemd."
 
 [[pages.sections.features]]
 title = "Hardware detection"

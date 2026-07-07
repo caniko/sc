@@ -18,8 +18,8 @@ struct Cli {
 enum Command {
     /// Run the fan control daemon
     Daemon {
-        /// Path to configuration file (RON format)
-        #[arg(short, long, default_value = "/etc/smartcool/config.ron")]
+        /// Path to configuration file (Pkl format)
+        #[arg(short, long, default_value = "/etc/smartcool/config.pkl")]
         config: PathBuf,
     },
     /// Query current sensor and fan status

@@ -8,16 +8,16 @@ Run the daemon with the default configuration path:
 sc daemon
 ```
 
-Run the daemon with an explicit RON file:
+Run the daemon with an explicit Pkl file:
 
 ```sh
-sc daemon --config /path/to/config.ron
+sc daemon --config /path/to/config.pkl
 ```
 
-Validate a RON configuration:
+Validate a Pkl configuration:
 
 ```sh
-sc config --validate /path/to/config.ron
+sc config --validate /path/to/config.pkl
 ```
 
 Query current sensor and fan state:

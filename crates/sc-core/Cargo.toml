@@ -6,6 +6,10 @@ description = "Shared types and IPC client for SmartCool fan control"
 
 [dependencies]
 anyhow.workspace = true
-ron.workspace = true
+pklx.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,5 +1,6 @@
 use sc_core::config::Config;
 use sc_core::ipc::TuningResponse;
+use serde_json::Value;
 
 use crate::optimize::{OptimizedConfig, OptimizedFan};
 
@@ -49,9 +50,7 @@ pub fn emit_nix(
         }
     }
 
-    out.push_str("{inputs, ...}: let\n");
-    out.push_str("  inherit (inputs.sc.inputs.ronix.lib) mkRON;\n");
-    out.push_str("in {\n");
+    out.push_str("{...}: {\n");
 
     // Kernel modules
     if !kernel_modules.is_empty() {
@@ -62,18 +61,15 @@ pub fn emit_nix(
         out.push_str(" ];\n\n");
     }
 
-    // Build the settings struct and serialize with ronix
+    // Build the settings struct and serialize as plain Nix attrs. The NixOS
+    // module is responsible for rendering those attrs to Pkl.
     let settings = build_settings(config, optimized);
-    let mut settings_nix =
-        ronix::to_nix(&settings).unwrap_or_else(|e| panic!("ronix serialization failed: {}", e));
-
-    // Wrap topology enum values with mkRON "enum" for correct RON generation
-    settings_nix = wrap_topology_enums(&settings_nix);
+    let settings_nix = settings_to_nix(&settings);
 
     out.push_str("  services.smartcool = {\n");
     out.push_str("    enable = true;\n");
 
-    // Indent the ronix output to sit under services.smartcool.settings
+    // Indent the generated attrset to sit under services.smartcool.settings.
     let indented = indent_block(&settings_nix, 4);
     out.push_str(&format!("    settings = {};\n", indented));
 
@@ -180,35 +176,6 @@ fn indent_block(s: &str, n: usize) -> String {
     out
 }
 
-/// Wrap topology enum values in the Nix output with `mkRON "enum"` calls.
-/// ronix::to_nix() emits enum variants as quoted strings (e.g. `position = "front";`)
-/// but ronixLib.toRON needs them as `mkRON "enum" "front"` to produce unquoted RON identifiers.
-fn wrap_topology_enums(nix: &str) -> String {
-    let position_values: &[&str] = &[
-        "front",
-        "rear",
-        "top",
-        "bottom",
-        "side",
-        "cpu_cooler",
-        "gpu_cooler",
-    ];
-    let direction_values: &[&str] = &["intake", "exhaust"];
-
-    let mut result = nix.to_string();
-    for val in position_values {
-        let from = format!("position = \"{}\";", val);
-        let to = format!("position = mkRON \"enum\" \"{}\";", val);
-        result = result.replace(&from, &to);
-    }
-    for val in direction_values {
-        let from = format!("direction = \"{}\";", val);
-        let to = format!("direction = mkRON \"enum\" \"{}\";", val);
-        result = result.replace(&from, &to);
-    }
-    result
-}
-
 /// Map hwmon chip name to kernel module name.
 fn hwmon_to_kernel_module(hwmon: &str) -> String {
     if hwmon.starts_with("nct6") {
@@ -216,6 +183,77 @@ fn hwmon_to_kernel_module(hwmon: &str) -> String {
     } else {
         hwmon.to_string()
     }
+}
+
+fn settings_to_nix(settings: &Settings) -> String {
+    let value = serde_json::to_value(settings).expect("settings serialize to JSON");
+    json_to_nix(&value, 0)
+}
+
+fn json_to_nix(value: &Value, indent: usize) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::String(value) => nix_string(value),
+        Value::Array(values) => {
+            if values.is_empty() {
+                return "[]".to_string();
+            }
+
+            let child_indent = indent + 2;
+            let mut out = "[\n".to_string();
+            for value in values {
+                out.push_str(&" ".repeat(child_indent));
+                out.push_str(&json_to_nix(value, child_indent));
+                out.push('\n');
+            }
+            out.push_str(&" ".repeat(indent));
+            out.push(']');
+            out
+        }
+        Value::Object(values) => {
+            if values.is_empty() {
+                return "{}".to_string();
+            }
+
+            let child_indent = indent + 2;
+            let mut out = "{\n".to_string();
+            for (key, value) in values {
+                out.push_str(&" ".repeat(child_indent));
+                out.push_str(&nix_attr_name(key));
+                out.push_str(" = ");
+                out.push_str(&json_to_nix(value, child_indent));
+                out.push_str(";\n");
+            }
+            out.push_str(&" ".repeat(indent));
+            out.push('}');
+            out
+        }
+    }
+}
+
+fn nix_string(value: &str) -> String {
+    serde_json::to_string(value)
+        .expect("string serializes")
+        .replace("${", "\\${")
+}
+
+fn nix_attr_name(value: &str) -> String {
+    if is_nix_identifier(value) {
+        value.to_string()
+    } else {
+        nix_string(value)
+    }
+}
+
+fn is_nix_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) if first == '_' || first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c == '-' || c.is_ascii_alphanumeric())
 }
 
 // ─── Serializable Nix output types ──────────────────────────────────────────
@@ -332,9 +370,8 @@ mod tests {
         assert!(nix.contains("poll_interval_ms = 2000;"));
         assert!(nix.contains("nct6775"));
         assert!(nix.contains("WARNING: No tuning data"));
-        assert!(nix.contains("inherit (inputs.sc.inputs.ronix.lib) mkRON;"));
-        assert!(nix.contains(r#"position = mkRON "enum" "front";"#));
-        assert!(nix.contains(r#"direction = mkRON "enum" "intake";"#));
+        assert!(nix.contains(r#"position = "front";"#));
+        assert!(nix.contains(r#"direction = "intake";"#));
     }
 
     #[test]

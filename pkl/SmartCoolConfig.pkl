@@ -1,0 +1,48 @@
+class DerivativeConfig {
+  window_size: UInt
+  boost_threshold: Number
+  decay_rate: Number
+}
+
+class TuningConfig {
+  ewma_span: UInt = 20
+  ccf_buffer_size: UInt = 120
+  ccf_max_lag: UInt = 30
+  step_threshold: UInt = 15
+  response_window: UInt = 60
+  regression_min_samples: UInt = 60
+}
+
+class SensorConfig {
+  name: String
+  hwmon: String
+  index: UInt
+  hwmon_instance: UInt? = null
+}
+
+class FanTopology {
+  position: "front" | "rear" | "top" | "bottom" | "side" | "cpu_cooler" | "gpu_cooler"
+  direction: "intake" | "exhaust"
+  group: String? = null
+}
+
+class CurvePoint {
+  temp: UInt
+  pwm: UInt
+}
+
+class FanConfig {
+  name: String
+  hwmon: String
+  pwm_index: UInt
+  hwmon_instance: UInt? = null
+  topology: FanTopology
+  sensors: Listing<String>
+  curve: Listing<CurvePoint>
+}
+
+poll_interval_ms: UInt
+derivative: DerivativeConfig
+sensors: Listing<SensorConfig>
+fans: Listing<FanConfig>
+tuning: TuningConfig = new {}

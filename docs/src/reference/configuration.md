@@ -1,6 +1,8 @@
 # Configuration
 
-SmartCool configuration is deserialized from RON into `sc_core::config::Config`.
+SmartCool configuration is evaluated from Pkl into `sc_core::config::Config`.
+The canonical schema is available at `pkl/SmartCoolConfig.pkl`, and user
+configuration files can `amends` it for Pkl-side structure checks.
 
 Top-level fields:
 

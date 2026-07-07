@@ -2,6 +2,7 @@ mod benchmark;
 mod detect;
 mod emit;
 mod optimize;
+mod pkl_format;
 mod stress;
 
 use anyhow::{Context, Result};
@@ -41,8 +42,8 @@ enum Command {
         #[arg(long)]
         include_ec: bool,
 
-        /// Output tuning data file (RON format)
-        #[arg(short, long, default_value = "tuning.ron")]
+        /// Output tuning data file (Pkl format)
+        #[arg(short, long, default_value = "tuning.pkl")]
         output: PathBuf,
 
         /// Also generate optimized NixOS config from benchmark results
@@ -55,11 +56,11 @@ enum Command {
     },
     /// Generate optimized NixOS config from an existing config + optional tuning data
     Generate {
-        /// Path to current SmartCool config (RON format)
+        /// Path to current SmartCool config (Pkl format)
         #[arg(short, long)]
         config: PathBuf,
 
-        /// Path to tuning data (RON format, exported by `sc tuning --export`)
+        /// Path to tuning data (Pkl format, exported by `sc-nixgen benchmark`)
         #[arg(short, long)]
         tuning: Option<PathBuf>,
 
@@ -122,10 +123,9 @@ fn main() -> Result<()> {
             // Run benchmark with built-in stress
             let tuning = benchmark::run_benchmark(&mut fans, &sensors, &sensor_names, &topo)?;
 
-            // Write tuning data as RON
-            let tuning_ron = ron::ser::to_string_pretty(&tuning, ron::ser::PrettyConfig::default())
-                .context("failed to serialize tuning data")?;
-            std::fs::write(&output, &tuning_ron)
+            let tuning_pkl =
+                pkl_format::to_pkl(&tuning).context("failed to serialize tuning data")?;
+            std::fs::write(&output, &tuning_pkl)
                 .with_context(|| format!("failed to write {}", output.display()))?;
             eprintln!("Tuning data written to {}", output.display());
 
@@ -158,14 +158,10 @@ fn main() -> Result<()> {
 
             let tuning = match tuning_path {
                 Some(path) => {
-                    let content = std::fs::read_to_string(&path).with_context(|| {
-                        format!("failed to read tuning data from {}", path.display())
+                    let tuning = pkl_format::load(&path, "tuning data").with_context(|| {
+                        format!("failed to load tuning data from {}", path.display())
                     })?;
-                    let t: sc_core::ipc::TuningResponse =
-                        ron::from_str(&content).with_context(|| {
-                            format!("failed to parse tuning RON from {}", path.display())
-                        })?;
-                    Some(t)
+                    Some(tuning)
                 }
                 None => None,
             };

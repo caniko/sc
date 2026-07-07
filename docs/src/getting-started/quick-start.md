@@ -22,8 +22,8 @@ sc analytics
 sc tuning
 ```
 
-Validate a RON configuration directly with:
+Validate a Pkl configuration directly with:
 
 ```sh
-sc config --validate /etc/smartcool/config.ron
+sc config --validate /etc/smartcool/config.pkl
 ```

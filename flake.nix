@@ -4,7 +4,6 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     crane.url = "github:ipetkov/crane";
-    ronix.url = "git+https://codeberg.org/caniko/ronix.git";
     nix-pklx.url = "git+https://codeberg.org/caniko/nix-pklx.git";
     plinth = {
       url = "git+https://codeberg.org/caniko/plinth";
@@ -28,7 +27,6 @@
   outputs = inputs @ {
     self,
     nixpkgs,
-    ronix,
     plinth,
     rs-harbor,
     rust-overlay,
@@ -164,6 +162,7 @@
         pkgs = pkgsFor system;
         smartcoolModule = self.nixosModules.default;
         package = packages.smartcool;
+        pklx = inputs.nix-pklx.packages.${system}.pklx;
       };
       pklValidate = pkgs.runCommand "pkl-validate" {
         src = ./.;
@@ -243,9 +242,7 @@
         ];
       });
 
-    lib = ronix.lib;
-
-    nixosModules.default = import ./nix/module.nix {ronixLib = ronix.lib;};
+    nixosModules.default = import ./nix/module.nix;
 
     checks = forSystems mkChecks;
   };

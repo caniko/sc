@@ -12,12 +12,11 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 pklx.workspace = true
-ron.workspace = true
-ronix.workspace = true
 sc-core.workspace = true
 sc-detect.workspace = true
 sc-hwmon.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]

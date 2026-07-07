@@ -11,6 +11,6 @@ The repository contains:
 - `sc-nixgen`, NixOS configuration generation from detected hardware and optional tuning data.
 - A NixOS module exposed as `nixosModules.default`.
 
-The daemon reads a RON configuration, sets configured fans to manual PWM mode, polls configured sensors, applies temperature curve control with derivative-based boosts, and exposes status, analytics, and tuning data through a Unix socket at `/run/smartcool/sc.sock`.
+The daemon reads a Pkl configuration, sets configured fans to manual PWM mode, polls configured sensors, applies temperature curve control with derivative-based boosts, and exposes status, analytics, and tuning data through a Unix socket at `/run/smartcool/sc.sock`.
 
 SmartCool is hardware-facing software. Validate generated configuration before enabling it, and make sure every controlled fan has a conservative curve for the machine it protects.
