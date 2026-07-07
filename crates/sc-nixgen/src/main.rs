@@ -27,13 +27,13 @@ enum Command {
         #[arg(short, long)]
         output: Option<PathBuf>,
 
-        /// Generate a topology YAML template for the benchmark command
+        /// Generate a topology Pkl template for the benchmark command
         #[arg(long)]
         topology_template: Option<PathBuf>,
     },
     /// Run thermal benchmark with built-in stress testing
     Benchmark {
-        /// YAML file describing fan topology (name, position, direction per fan)
+        /// Pkl file describing fan topology (name, position, direction per fan)
         #[arg(short, long)]
         topology: PathBuf,
 

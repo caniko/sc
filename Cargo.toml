@@ -13,3 +13,22 @@ name = "smartcool"
 
 [workspace.package]
 version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+pklx = { git = "https://codeberg.org/caniko/nix-pklx.git" }
+ron = "0.12"
+ronix = "0.1"
+sc-core = { path = "crates/sc-core" }
+sc-detect = { path = "crates/sc-detect" }
+sc-hwmon = { path = "crates/sc-hwmon" }
+sd-notify = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+signal-hook = "0.4"
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

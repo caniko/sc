@@ -109,7 +109,7 @@ pub fn run_daemon(config_path: &Path) -> Result<()> {
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown))?;
 
     // Notify systemd we're ready
-    let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
+    let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
 
     let poll_interval = Duration::from_millis(config.poll_interval_ms);
     let mut tick: u32 = 0;
