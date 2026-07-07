@@ -1,6 +1,6 @@
 [ci]
 runtime = "nix"
-runner = "atlas-nix-trusted"
+runner = "codeberg-medium"
 workspace = true
 with_audit = true
 with_deny = true
