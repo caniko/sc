@@ -4,7 +4,9 @@ use std::os::unix::net::UnixListener;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use sc_core::ipc::{Request, Response, StatusResponse, AnalyticsResponse, TuningResponse, SOCKET_PATH};
+use sc_core::ipc::{
+    AnalyticsResponse, Request, Response, StatusResponse, TuningResponse, SOCKET_PATH,
+};
 
 /// Shared daemon state that the IPC server can read.
 pub struct DaemonState {
@@ -22,24 +24,22 @@ pub fn start(state: Arc<Mutex<DaemonState>>) -> Result<()> {
 
     tracing::info!(path = SOCKET_PATH, "IPC server listening");
 
-    std::thread::spawn(move || {
-        loop {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    let state = Arc::clone(&state);
-                    std::thread::spawn(move || {
-                        if let Err(e) = handle_connection(stream, &state) {
-                            tracing::warn!(error = %e, "IPC connection error");
-                        }
-                    });
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "IPC accept error");
-                    std::thread::sleep(Duration::from_secs(1));
-                }
+    std::thread::spawn(move || loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let state = Arc::clone(&state);
+                std::thread::spawn(move || {
+                    if let Err(e) = handle_connection(stream, &state) {
+                        tracing::warn!(error = %e, "IPC connection error");
+                    }
+                });
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "IPC accept error");
+                std::thread::sleep(Duration::from_secs(1));
             }
         }
     });

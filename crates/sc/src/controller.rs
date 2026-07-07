@@ -5,10 +5,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::thermal::{
+    analytics::AnalyticsTracker,
+    derivative::DerivativeTracker,
+    tuning::{ThermalSystem, TuningParams},
+};
 use sc_core::config::Config;
 use sc_core::ipc;
 use sc_hwmon::{fan::Fan, sensor::Sensor};
-use crate::thermal::{analytics::AnalyticsTracker, derivative::DerivativeTracker, tuning::{ThermalSystem, TuningParams}};
 
 /// Number of analytics history snapshots to retain per fan.
 const ANALYTICS_HISTORY_SIZE: usize = 300;
@@ -206,7 +210,8 @@ fn control_tick(
             let decay = config.derivative.decay_rate;
             mf.derivative_boost = (mf.derivative_boost - decay).max(0.0);
         } else {
-            mf.derivative_boost = (mf.derivative_boost - config.derivative.decay_rate * 0.5).max(0.0);
+            mf.derivative_boost =
+                (mf.derivative_boost - config.derivative.decay_rate * 0.5).max(0.0);
         }
 
         let boost = mf.derivative_boost.round() as i16;
@@ -225,7 +230,7 @@ fn control_tick(
             .collect();
         mf.analytics.record(target_pwm, linked_temps);
 
-        if tick % ANALYTICS_RECOMPUTE_INTERVAL == 0 {
+        if tick.is_multiple_of(ANALYTICS_RECOMPUTE_INTERVAL) {
             mf.analytics.recompute();
         }
 
@@ -280,35 +285,52 @@ fn control_tick(
             .coupling_matrix()
             .into_iter()
             .map(|c| ipc::CouplingEntry {
-                fan: c.fan, sensor: c.sensor, beta: c.beta, r_squared: c.r_squared,
+                fan: c.fan,
+                sensor: c.sensor,
+                beta: c.beta,
+                r_squared: c.r_squared,
             })
             .collect(),
         step_responses: thermal_system
             .step_responses()
             .into_iter()
             .map(|s| ipc::StepResponseEntry {
-                fan: s.fan, sensor: s.sensor, gain_k: s.gain_k, tau_ticks: s.tau_ticks, n_events: s.n_events,
+                fan: s.fan,
+                sensor: s.sensor,
+                gain_k: s.gain_k,
+                tau_ticks: s.tau_ticks,
+                n_events: s.n_events,
             })
             .collect(),
         cross_correlations: thermal_system
             .cross_correlations()
             .into_iter()
             .map(|c| ipc::CorrelationEntry {
-                fan: c.fan, sensor: c.sensor, peak_ccf: c.peak_ccf, optimal_lag: c.optimal_lag,
+                fan: c.fan,
+                sensor: c.sensor,
+                peak_ccf: c.peak_ccf,
+                optimal_lag: c.optimal_lag,
             })
             .collect(),
         thermal_integrals: thermal_system
             .thermal_integrals()
             .into_iter()
             .map(|i| ipc::IntegralEntry {
-                sensor: i.sensor, integral: i.integral, baseline: i.baseline,
+                sensor: i.sensor,
+                integral: i.integral,
+                baseline: i.baseline,
             })
             .collect(),
     };
 
     if let Ok(mut state) = shared_state.lock() {
-        state.status = ipc::StatusResponse { sensors: status_sensors, fans: status_fans };
-        state.analytics = ipc::AnalyticsResponse { fans: analytics_fans };
+        state.status = ipc::StatusResponse {
+            sensors: status_sensors,
+            fans: status_fans,
+        };
+        state.analytics = ipc::AnalyticsResponse {
+            fans: analytics_fans,
+        };
         state.tuning = tuning_response;
     }
 
@@ -320,8 +342,7 @@ fn init_tracing() {
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::EnvFilter;
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let registry = tracing_subscriber::registry().with(filter);
 

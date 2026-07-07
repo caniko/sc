@@ -40,9 +40,9 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Daemon { config: config_path } => {
-            controller::run_daemon(&config_path)
-        }
+        Command::Daemon {
+            config: config_path,
+        } => controller::run_daemon(&config_path),
         Command::Status => {
             let response = sc_core::ipc::query(sc_core::ipc::Request::Status)?;
             display::print_status(&response);
@@ -60,7 +60,11 @@ fn main() -> Result<()> {
         }
         Command::Config { validate } => {
             let cfg = sc_core::config::load(&validate)?;
-            println!("Configuration valid: {} sensors, {} fans", cfg.sensors.len(), cfg.fans.len());
+            println!(
+                "Configuration valid: {} sensors, {} fans",
+                cfg.sensors.len(),
+                cfg.fans.len()
+            );
             Ok(())
         }
     }

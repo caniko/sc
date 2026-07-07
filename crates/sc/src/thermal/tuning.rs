@@ -35,7 +35,8 @@ impl EwmaStats {
         self.variance = (1.0 - self.alpha) * (self.variance + self.alpha * delta * delta);
     }
 
-    pub fn smoothed(&self) -> f64 {
+    #[cfg(test)]
+    fn smoothed(&self) -> f64 {
         self.mean
     }
 
@@ -161,13 +162,6 @@ fn ring_idx(write_pos: usize, count: usize, i: usize, capacity: usize) -> usize 
 
 // ─── Step Response Detector ───────────────────────────────────────────────────
 
-/// Tracks individual step events for a (fan, sensor) pair.
-struct StepEvent {
-    delta_pwm: f64,
-    temps: Vec<f64>, // temperature trajectory after step
-    t0_temp: f64,    // temperature at step moment
-}
-
 /// Detects PWM step changes and fits first-order exponential response.
 pub struct StepDetector {
     step_threshold: f64,
@@ -252,7 +246,11 @@ impl StepDetector {
                     if trajectory.len() < 5 {
                         continue;
                     }
-                    let t0 = step.initial_temps.get(sensor).copied().unwrap_or(trajectory[0]);
+                    let t0 = step
+                        .initial_temps
+                        .get(sensor)
+                        .copied()
+                        .unwrap_or(trajectory[0]);
                     if let Some(fitted) = fit_first_order(t0, trajectory, step.delta_pwm) {
                         self.completed
                             .entry((fan.clone(), sensor.clone()))
@@ -335,7 +333,10 @@ fn fit_first_order(t0_temp: f64, trajectory: &[f64], delta_pwm: f64) -> Option<F
     let tau = (tau_lo + tau_hi) / 2.0;
     let gain_k = delta_t / delta_pwm;
 
-    Some(FittedStep { gain_k, tau_ticks: tau })
+    Some(FittedStep {
+        gain_k,
+        tau_ticks: tau,
+    })
 }
 
 /// Sum of squared errors for the first-order model.
@@ -527,10 +528,11 @@ fn cholesky_solve(a_flat: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
     let mut l = vec![vec![0.0; n]; n];
     for i in 0..n {
         for j in 0..=i {
-            let mut sum = 0.0;
-            for k in 0..j {
-                sum += l[i][k] * l[j][k];
-            }
+            let sum: f64 = l[i][..j]
+                .iter()
+                .zip(l[j][..j].iter())
+                .map(|(left, right)| left * right)
+                .sum();
             if i == j {
                 let diag = a[i][i] - sum;
                 if diag <= 0.0 {
@@ -649,11 +651,7 @@ pub struct ThermalSystem {
 }
 
 impl ThermalSystem {
-    pub fn new(
-        params: &TuningParams,
-        fan_names: &[String],
-        sensor_names: &[String],
-    ) -> Self {
+    pub fn new(params: &TuningParams, fan_names: &[String], sensor_names: &[String]) -> Self {
         let mut ewma = HashMap::new();
         let mut integrals = HashMap::new();
         for s in sensor_names {
@@ -676,7 +674,8 @@ impl ThermalSystem {
 
         let step_detector = StepDetector::new(params.step_threshold, params.response_window);
 
-        let coupling = CouplingEstimator::new(fan_names, sensor_names, params.regression_min_samples);
+        let coupling =
+            CouplingEstimator::new(fan_names, sensor_names, params.regression_min_samples);
 
         Self {
             ewma,
@@ -691,11 +690,7 @@ impl ThermalSystem {
     }
 
     /// Called each tick from the controller.
-    pub fn update(
-        &mut self,
-        sensor_temps: &HashMap<String, f64>,
-        fan_pwms: &HashMap<String, u8>,
-    ) {
+    pub fn update(&mut self, sensor_temps: &HashMap<String, f64>, fan_pwms: &HashMap<String, u8>) {
         // 1. Update EWMA smoothers
         for (name, &temp) in sensor_temps {
             if let Some(ewma) = self.ewma.get_mut(name) {
@@ -709,10 +704,7 @@ impl ThermalSystem {
                 .get(&corr.fan_name)
                 .map(|&v| v as f64)
                 .unwrap_or(0.0);
-            let temp = sensor_temps
-                .get(&corr.sensor_name)
-                .copied()
-                .unwrap_or(0.0);
+            let temp = sensor_temps.get(&corr.sensor_name).copied().unwrap_or(0.0);
             corr.update(pwm, temp);
         }
 
@@ -731,7 +723,7 @@ impl ThermalSystem {
         }
 
         // Periodic recomputation (every 30 ticks)
-        if self.tick % 30 == 0 && self.tick > 0 {
+        if self.tick > 0 && self.tick.is_multiple_of(30) {
             for corr in &mut self.correlators {
                 corr.recompute();
             }
@@ -741,12 +733,6 @@ impl ThermalSystem {
         self.prev_pwms = fan_pwms.clone();
         self.tick += 1;
     }
-
-    /// Get smoothed temperature for a sensor.
-    pub fn smoothed_temp(&self, sensor: &str) -> Option<f64> {
-        self.ewma.get(sensor).map(|e| e.smoothed())
-    }
-
     /// Get volatility for a sensor.
     #[allow(dead_code)]
     pub fn volatility(&self, sensor: &str) -> Option<f64> {

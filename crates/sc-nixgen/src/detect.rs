@@ -11,14 +11,7 @@ use sc_detect::{ChipClass, DetectedFan, DetectedSensor, DetectionResult};
 
 // ─── Default Curves ──────────────────────────────────────────────────────────
 
-const CPU_CURVE: &[(u32, u8)] = &[
-    (40, 0),
-    (50, 40),
-    (60, 80),
-    (70, 140),
-    (80, 200),
-    (90, 255),
-];
+const CPU_CURVE: &[(u32, u8)] = &[(40, 0), (50, 40), (60, 80), (70, 140), (80, 200), (90, 255)];
 
 const GPU_CURVE: &[(u32, u8)] = &[
     (40, 0),
@@ -29,14 +22,7 @@ const GPU_CURVE: &[(u32, u8)] = &[
     (95, 255),
 ];
 
-const CASE_CURVE: &[(u32, u8)] = &[
-    (40, 0),
-    (50, 30),
-    (60, 60),
-    (70, 100),
-    (80, 160),
-    (90, 255),
-];
+const CASE_CURVE: &[(u32, u8)] = &[(40, 0), (50, 30), (60, 60), (70, 100), (80, 160), (90, 255)];
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
@@ -379,5 +365,4 @@ mod tests {
         let config = build_config(&result);
         assert_eq!(config.fans[0].sensors, vec!["cpu", "gpu"]);
     }
-
 }

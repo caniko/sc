@@ -5,10 +5,7 @@ pub fn print_status(response: &Response) {
     match response {
         Response::Status(status) => {
             println!("Sensors:");
-            println!(
-                "  {:<15} {:>8} {:>10}",
-                "Name", "Temp (C)", "dT/dt (C/s)"
-            );
+            println!("  {:<15} {:>8} {:>10}", "Name", "Temp (C)", "dT/dt (C/s)");
             println!("  {}", "-".repeat(35));
             for sensor in &status.sensors {
                 println!(

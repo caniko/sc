@@ -177,10 +177,7 @@ pub fn discover_sensors(chips: &[HwmonChip], include_ec: bool) -> Result<Vec<Det
             let millidegrees = match read_sysfs_i64(&input_path) {
                 Some(v) => v,
                 None => {
-                    eprintln!(
-                        "warning: could not read {}, skipping",
-                        input_path.display()
-                    );
+                    eprintln!("warning: could not read {}, skipping", input_path.display());
                     continue;
                 }
             };
@@ -234,9 +231,8 @@ pub fn discover_fans(chips: &[HwmonChip]) -> Result<Vec<DetectedFan>> {
         // Skip iGPUs: when multiple GPU chips exist, skip any that lack fan/PWM
         // hardware (iGPUs sit on the CPU die and have no fan).
         if chip.class == ChipClass::GpuTemp && gpu_chip_count > 1 {
-            let has_fan_hw = (1..=MAX_PWM_INDEX).any(|i| {
-                chip.path.join(format!("fan{}_input", i)).exists()
-            });
+            let has_fan_hw =
+                (1..=MAX_PWM_INDEX).any(|i| chip.path.join(format!("fan{}_input", i)).exists());
             if !has_fan_hw {
                 continue;
             }
@@ -415,14 +411,8 @@ mod tests {
 
     #[test]
     fn gpu_sensor_naming_multi() {
-        assert_eq!(
-            auto_name_gpu_sensor(&Some("edge".into()), true, 0),
-            "gpu0"
-        );
-        assert_eq!(
-            auto_name_gpu_sensor(&Some("edge".into()), true, 1),
-            "gpu1"
-        );
+        assert_eq!(auto_name_gpu_sensor(&Some("edge".into()), true, 0), "gpu0");
+        assert_eq!(auto_name_gpu_sensor(&Some("edge".into()), true, 1), "gpu1");
         assert_eq!(
             auto_name_gpu_sensor(&Some("junction".into()), true, 0),
             "gpu0_junction"

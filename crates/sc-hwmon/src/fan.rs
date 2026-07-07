@@ -53,7 +53,10 @@ impl Fan {
             paths.get(idx as usize).cloned().ok_or_else(|| {
                 anyhow::anyhow!(
                     "fan '{}': '{}' has {} instances but hwmon_instance={} requested",
-                    name, hwmon_name, paths.len(), idx
+                    name,
+                    hwmon_name,
+                    paths.len(),
+                    idx
                 )
             })?
         } else {
@@ -64,7 +67,9 @@ impl Fan {
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "fan '{}': no '{}' hwmon instance has pwm{}",
-                        name, hwmon_name, pwm_index
+                        name,
+                        hwmon_name,
+                        pwm_index
                     )
                 })?
         };

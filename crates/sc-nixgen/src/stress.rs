@@ -80,10 +80,7 @@ impl StressProcess {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
-            eprintln!(
-                "  {} forced to max clocks (was: {})",
-                card_name, original
-            );
+            eprintln!("  {} forced to max clocks (was: {})", card_name, original);
 
             originals.push((perf_path, original));
         }
@@ -111,11 +108,7 @@ impl StressProcess {
             StressInner::Gpu { originals } => {
                 for (path, original) in originals.drain(..) {
                     if let Err(e) = std::fs::write(&path, &original) {
-                        eprintln!(
-                            "  warning: failed to restore {}: {}",
-                            path.display(),
-                            e
-                        );
+                        eprintln!("  warning: failed to restore {}: {}", path.display(), e);
                     }
                 }
             }
@@ -161,7 +154,7 @@ fn cpu_burn_loop(running: &AtomicBool) {
         // Feed result back to prevent optimizer from eliding the work
         // and keep values from growing unbounded
         iteration = iteration.wrapping_add(1);
-        if iteration % 1024 == 0 {
+        if iteration.is_multiple_of(1024) {
             for i in 0..16 {
                 a[i] = result[i].fract() * 0.5 + 0.25;
             }

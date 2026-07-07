@@ -102,8 +102,6 @@ pub fn emit_nix_from_detected(config: &Config) -> String {
                         pwm: p.pwm,
                     })
                     .collect(),
-                gamma: 1.0,
-                max_beta: 0.0,
             })
             .collect(),
         has_tuning_data: false,
@@ -187,7 +185,13 @@ fn indent_block(s: &str, n: usize) -> String {
 /// but ronixLib.toRON needs them as `mkRON "enum" "front"` to produce unquoted RON identifiers.
 fn wrap_topology_enums(nix: &str) -> String {
     let position_values: &[&str] = &[
-        "front", "rear", "top", "bottom", "side", "cpu_cooler", "gpu_cooler",
+        "front",
+        "rear",
+        "top",
+        "bottom",
+        "side",
+        "cpu_cooler",
+        "gpu_cooler",
     ];
     let direction_values: &[&str] = &["intake", "exhaust"];
 
@@ -317,8 +321,6 @@ mod tests {
                     CurvePoint { temp: 45, pwm: 20 },
                     CurvePoint { temp: 85, pwm: 200 },
                 ],
-                gamma: 1.0,
-                max_beta: 0.0,
             }],
             has_tuning_data: false,
         };

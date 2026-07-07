@@ -6,8 +6,6 @@ pub struct OptimizedFan {
     pub name: String,
     pub sensors: Vec<String>,
     pub curve: Vec<CurvePoint>,
-    pub gamma: f64,
-    pub max_beta: f64,
 }
 
 /// Result of optimization: one entry per fan in the original config.
@@ -62,9 +60,14 @@ pub fn optimize_config(
                     .map(|f| OptimizedFan {
                         name: f.name.clone(),
                         sensors: f.sensors.clone(),
-                        curve: f.curve.iter().map(|p| CurvePoint { temp: p.temp, pwm: p.pwm }).collect(),
-                        gamma: 1.0,
-                        max_beta: 0.0,
+                        curve: f
+                            .curve
+                            .iter()
+                            .map(|p| CurvePoint {
+                                temp: p.temp,
+                                pwm: p.pwm,
+                            })
+                            .collect(),
                     })
                     .collect(),
                 has_tuning_data: false,
@@ -115,8 +118,6 @@ pub fn optimize_config(
                 name: fan_config.name.clone(),
                 sensors,
                 curve,
-                gamma,
-                max_beta,
             }
         })
         .collect();
@@ -292,8 +293,12 @@ mod tests {
         let linear = generate_urgency_curve(&fan, "cpu", 1.0);
         let convex = generate_urgency_curve(&fan, "cpu", 1.5);
         // Midpoint of convex curve should be lower than linear
-        assert!(convex[3].pwm <= linear[3].pwm,
-            "convex midpoint {}  should be <= linear midpoint {}", convex[3].pwm, linear[3].pwm);
+        assert!(
+            convex[3].pwm <= linear[3].pwm,
+            "convex midpoint {}  should be <= linear midpoint {}",
+            convex[3].pwm,
+            linear[3].pwm
+        );
     }
 
     #[test]

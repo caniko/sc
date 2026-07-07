@@ -26,7 +26,10 @@ impl Sensor {
             paths.get(idx as usize).cloned().ok_or_else(|| {
                 anyhow::anyhow!(
                     "sensor '{}': '{}' has {} instances but hwmon_instance={} requested",
-                    name, hwmon_name, paths.len(), idx
+                    name,
+                    hwmon_name,
+                    paths.len(),
+                    idx
                 )
             })?
         } else {
@@ -37,7 +40,9 @@ impl Sensor {
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "sensor '{}': no '{}' hwmon instance has temp{}_input",
-                        name, hwmon_name, index
+                        name,
+                        hwmon_name,
+                        index
                     )
                 })?
         };

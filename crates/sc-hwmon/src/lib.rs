@@ -38,8 +38,8 @@ pub fn read_sysfs<T: std::str::FromStr>(path: &Path) -> Result<T>
 where
     T::Err: std::fmt::Display,
 {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
 
     content
         .trim()

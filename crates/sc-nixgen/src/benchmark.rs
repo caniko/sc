@@ -142,7 +142,7 @@ pub fn generate_topology_template(result: &DetectionResult) -> String {
         out.push_str("    positions:\n");
         out.push_str(&format!("      - location: {}\n", location));
         out.push_str(&format!("        direction: {}\n", direction));
-        out.push_str("\n");
+        out.push('\n');
     }
 
     out
@@ -184,12 +184,11 @@ enum FanRole {
 struct ClassifiedFan {
     name: String,
     role: FanRole,
-    position: FanPosition,
-    direction: AirflowDirection,
-    expected_sensors: Vec<String>,
 }
 
-fn classify_fans(topo: &Topology, sensor_names: &[String]) -> Result<Vec<ClassifiedFan>> {
+type PreparedHardware = (Vec<Fan>, Vec<Sensor>, Vec<String>, Config);
+
+fn classify_fans(topo: &Topology) -> Result<Vec<ClassifiedFan>> {
     let mut classified = Vec::new();
     let mut group_reps: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
@@ -203,11 +202,15 @@ fn classify_fans(topo: &Topology, sensor_names: &[String]) -> Result<Vec<Classif
     }
 
     for ft in &topo.fans {
-        anyhow::ensure!(!ft.positions.is_empty(), "fan '{}' has no positions", ft.name);
+        anyhow::ensure!(
+            !ft.positions.is_empty(),
+            "fan '{}' has no positions",
+            ft.name
+        );
 
         let primary = ft.positions.iter().max_by_key(|p| p.count).unwrap();
         let position = parse_position(&primary.location)?;
-        let direction = parse_direction(&primary.direction)?;
+        let _direction = parse_direction(&primary.direction)?;
 
         let is_direct = matches!(position, FanPosition::CpuCooler | FanPosition::GpuCooler);
 
@@ -226,26 +229,9 @@ fn classify_fans(topo: &Topology, sensor_names: &[String]) -> Result<Vec<Classif
             FanRole::CaseRepresentative
         };
 
-        let expected_sensors = match position {
-            FanPosition::CpuCooler => sensor_names
-                .iter()
-                .filter(|s| s.starts_with("cpu"))
-                .cloned()
-                .collect(),
-            FanPosition::GpuCooler => sensor_names
-                .iter()
-                .filter(|s| s.starts_with("gpu"))
-                .cloned()
-                .collect(),
-            _ => sensor_names.to_vec(),
-        };
-
         classified.push(ClassifiedFan {
             name: ft.name.clone(),
             role,
-            position,
-            direction,
-            expected_sensors,
         });
     }
 
@@ -254,10 +240,7 @@ fn classify_fans(topo: &Topology, sensor_names: &[String]) -> Result<Vec<Classif
 
 // ─── Prepare from detection ─────────────────────────────────────────────────
 
-pub fn prepare_from_detect(
-    result: &DetectionResult,
-    topo: &Topology,
-) -> Result<(Vec<Fan>, Vec<Sensor>, Vec<String>, Config)> {
+pub fn prepare_from_detect(result: &DetectionResult, topo: &Topology) -> Result<PreparedHardware> {
     let instance_map = build_instance_map(result);
 
     let mut sensors = Vec::new();
@@ -414,7 +397,10 @@ fn wait_for_settle(sensors: &[Sensor]) -> Vec<f64> {
 
     loop {
         let elapsed = start.elapsed().as_secs();
-        let temps: Vec<f64> = sensors.iter().map(|s| s.read_temp_c().unwrap_or(0.0)).collect();
+        let temps: Vec<f64> = sensors
+            .iter()
+            .map(|s| s.read_temp_c().unwrap_or(0.0))
+            .collect();
 
         if !initialized {
             ewma_fast = temps.clone();
@@ -465,7 +451,10 @@ fn wait_for_stress_warmup(
             return;
         }
 
-        let temps: Vec<f64> = sensors.iter().map(|s| s.read_temp_c().unwrap_or(0.0)).collect();
+        let temps: Vec<f64> = sensors
+            .iter()
+            .map(|s| s.read_temp_c().unwrap_or(0.0))
+            .collect();
 
         // Check if any target sensor has risen enough
         let mut max_rise = 0.0f64;
@@ -522,7 +511,7 @@ fn find_stall_threshold(fan: &mut Fan) -> Result<u8> {
         return Ok(0);
     }
 
-    lo = lo.max(actual_hi.saturating_sub(hi).max(0));
+    lo = lo.max(actual_hi.saturating_sub(hi));
 
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
@@ -550,7 +539,6 @@ fn find_stall_threshold(fan: &mut Fan) -> Result<u8> {
 /// Per-fan measurement data collected during a stress phase.
 struct PhaseMeasurement {
     fan_name: String,
-    stress_target: String, // "cpu" or "gpu"
     /// For each PWM level: (pwm, per-sensor average temps)
     readings: Vec<(u8, Vec<f64>)>,
 }
@@ -568,7 +556,7 @@ pub fn run_benchmark(
     sensor_names: &[String],
     topo: &Topology,
 ) -> Result<TuningResponse> {
-    let classified = classify_fans(topo, sensor_names)?;
+    let classified = classify_fans(topo)?;
     let n_sweepable = classified
         .iter()
         .filter(|c| !matches!(c.role, FanRole::CaseFollower { .. }))
@@ -587,7 +575,8 @@ pub fn run_benchmark(
     );
 
     let est_secs = 30
-        + n_phases as u64 * (STRESS_WARMUP_SECS + n_sweepable as u64 * PWM_LEVELS.len() as u64 * 12);
+        + n_phases as u64
+            * (STRESS_WARMUP_SECS + n_sweepable as u64 * PWM_LEVELS.len() as u64 * 12);
     eprintln!("Estimated duration: ~{} minutes", est_secs / 60 + 1);
 
     // ── Pre-flight: controllability check ───────────────────────────────────
@@ -668,7 +657,7 @@ pub fn run_benchmark(
             &stall_thresholds,
             &baseline,
             "cpu",
-            || StressProcess::start_cpu(),
+            StressProcess::start_cpu,
         )?;
         all_measurements.extend(phase_measurements);
     }
@@ -684,7 +673,7 @@ pub fn run_benchmark(
             &stall_thresholds,
             &baseline,
             "gpu",
-            || StressProcess::start_gpu(),
+            StressProcess::start_gpu,
         )?;
         all_measurements.extend(phase_measurements);
     }
@@ -716,6 +705,7 @@ pub fn run_benchmark(
 /// 2. Wait for target sensors to warm up
 /// 3. Sweep each fan through PWM levels, measuring sensor temps
 /// 4. Stop stress
+#[allow(clippy::too_many_arguments)]
 fn run_stress_phase<F>(
     fans: &mut [Fan],
     sensors: &[Sensor],
@@ -787,11 +777,7 @@ where
 
         // Sweep from high to low PWM (start with max cooling, reduce to see temp rise)
         let effective_levels: Vec<u8> = {
-            let mut levels: Vec<u8> = PWM_LEVELS
-                .iter()
-                .copied()
-                .filter(|&p| p > stall)
-                .collect();
+            let mut levels: Vec<u8> = PWM_LEVELS.iter().copied().filter(|&p| p > stall).collect();
             // Add stall threshold as lowest level
             levels.insert(0, stall.max(1));
             // Sort descending: high PWM (max cooling) first
@@ -825,7 +811,6 @@ where
 
         measurements.push(PhaseMeasurement {
             fan_name: cf.name.clone(),
-            stress_target: target_prefix.to_string(),
             readings,
         });
     }
@@ -888,7 +873,7 @@ fn compute_tuning(
             let key = (measurement.fan_name.clone(), sensor_name.clone());
 
             // Keep the measurement with strongest |beta| and reasonable R²
-            let dominated = best_coupling.get(&key).map_or(false, |(prev_beta, prev_r2)| {
+            let dominated = best_coupling.get(&key).is_some_and(|(prev_beta, prev_r2)| {
                 // Keep existing if it has stronger coupling with decent R²
                 prev_beta.abs() > beta.abs() && *prev_r2 > 0.3
             });

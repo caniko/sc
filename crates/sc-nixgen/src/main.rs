@@ -96,10 +96,7 @@ fn main() -> Result<()> {
                     .with_context(|| format!("failed to write {}", topo_path.display()))?;
                 eprintln!("Topology template written to {}", topo_path.display());
                 eprintln!("Edit it to match your case layout, then run:");
-                eprintln!(
-                    "  sc-nixgen benchmark --topology {}",
-                    topo_path.display()
-                );
+                eprintln!("  sc-nixgen benchmark --topology {}", topo_path.display());
             }
 
             Ok(())
@@ -123,13 +120,11 @@ fn main() -> Result<()> {
                 benchmark::prepare_from_detect(&result, &topo)?;
 
             // Run benchmark with built-in stress
-            let tuning =
-                benchmark::run_benchmark(&mut fans, &sensors, &sensor_names, &topo)?;
+            let tuning = benchmark::run_benchmark(&mut fans, &sensors, &sensor_names, &topo)?;
 
             // Write tuning data as RON
-            let tuning_ron =
-                ron::ser::to_string_pretty(&tuning, ron::ser::PrettyConfig::default())
-                    .context("failed to serialize tuning data")?;
+            let tuning_ron = ron::ser::to_string_pretty(&tuning, ron::ser::PrettyConfig::default())
+                .context("failed to serialize tuning data")?;
             std::fs::write(&output, &tuning_ron)
                 .with_context(|| format!("failed to write {}", output.display()))?;
             eprintln!("Tuning data written to {}", output.display());
@@ -144,8 +139,7 @@ fn main() -> Result<()> {
                     Some(&tuning),
                     coupling_threshold,
                 );
-                let nix_output =
-                    emit::emit_nix(&controllable_config, &optimized, Some(&tuning));
+                let nix_output = emit::emit_nix(&controllable_config, &optimized, Some(&tuning));
                 std::fs::write(&nix_path, &nix_output)
                     .with_context(|| format!("failed to write {}", nix_path.display()))?;
                 eprintln!("NixOS config written to {}", nix_path.display());
@@ -159,17 +153,16 @@ fn main() -> Result<()> {
             output,
             coupling_threshold,
         } => {
-            let config = sc_core::config::load(&config_path).with_context(|| {
-                format!("failed to load config from {}", config_path.display())
-            })?;
+            let config = sc_core::config::load(&config_path)
+                .with_context(|| format!("failed to load config from {}", config_path.display()))?;
 
             let tuning = match tuning_path {
                 Some(path) => {
                     let content = std::fs::read_to_string(&path).with_context(|| {
                         format!("failed to read tuning data from {}", path.display())
                     })?;
-                    let t: sc_core::ipc::TuningResponse = ron::from_str(&content)
-                        .with_context(|| {
+                    let t: sc_core::ipc::TuningResponse =
+                        ron::from_str(&content).with_context(|| {
                             format!("failed to parse tuning RON from {}", path.display())
                         })?;
                     Some(t)
@@ -177,8 +170,7 @@ fn main() -> Result<()> {
                 None => None,
             };
 
-            let optimized =
-                optimize::optimize_config(&config, tuning.as_ref(), coupling_threshold);
+            let optimized = optimize::optimize_config(&config, tuning.as_ref(), coupling_threshold);
             let nix_output = emit::emit_nix(&config, &optimized, tuning.as_ref());
 
             write_output(&nix_output, output.as_deref())
@@ -212,7 +204,9 @@ fn filter_uncontrollable_fans(
             "Excluding uncontrollable fans from config: {}",
             removed.join(", ")
         );
-        filtered.fans.retain(|f| fans_with_data.contains(f.name.as_str()));
+        filtered
+            .fans
+            .retain(|f| fans_with_data.contains(f.name.as_str()));
     }
 
     filtered

@@ -47,12 +47,24 @@ impl Default for TuningConfig {
     }
 }
 
-fn default_ewma_span() -> usize { 20 }
-fn default_ccf_buffer_size() -> usize { 120 }
-fn default_ccf_max_lag() -> usize { 30 }
-fn default_step_threshold() -> u8 { 15 }
-fn default_response_window() -> usize { 60 }
-fn default_regression_min_samples() -> usize { 60 }
+fn default_ewma_span() -> usize {
+    20
+}
+fn default_ccf_buffer_size() -> usize {
+    120
+}
+fn default_ccf_max_lag() -> usize {
+    30
+}
+fn default_step_threshold() -> u8 {
+    15
+}
+fn default_response_window() -> usize {
+    60
+}
+fn default_regression_min_samples() -> usize {
+    60
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DerivativeConfig {
@@ -146,7 +158,7 @@ impl FanConfig {
             return 0;
         }
 
-        let temp = temp_c as f64;
+        let temp = temp_c;
 
         // Below lowest point
         if temp <= self.curve[0].temp as f64 {
@@ -188,7 +200,10 @@ pub fn load(path: &Path) -> Result<Config> {
 }
 
 fn validate(config: &Config) -> Result<()> {
-    anyhow::ensure!(!config.sensors.is_empty(), "at least one sensor is required");
+    anyhow::ensure!(
+        !config.sensors.is_empty(),
+        "at least one sensor is required"
+    );
     anyhow::ensure!(!config.fans.is_empty(), "at least one fan is required");
     anyhow::ensure!(config.poll_interval_ms > 0, "poll_interval_ms must be > 0");
     anyhow::ensure!(
