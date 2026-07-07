@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   nix-check:
-    runs-on: atlas-nix-trusted
+    runs-on: codeberg-medium
     env:
       NIX_CONFIG: "experimental-features = nix-command flakes"
       XDG_CACHE_HOME: "/tmp/.cache"
@@ -32,8 +32,8 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
-            substituters = https://attic.candee.baby/canix https://cache.nixos.org
-            trusted-public-keys = canix:lPzPzKrmYqW5Rxa5r0uQWvCqD3S5nx0h2eCy7XD5JM8= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+            substituters = https://cache.nixos.org
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
       - run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
       - run: nix develop -c cargo fmt --all -- --check
 
@@ -48,8 +48,8 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
-            substituters = https://attic.candee.baby/canix https://cache.nixos.org
-            trusted-public-keys = canix:lPzPzKrmYqW5Rxa5r0uQWvCqD3S5nx0h2eCy7XD5JM8= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+            substituters = https://cache.nixos.org
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
       - run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
       - run: nix develop -c cargo clippy --workspace --all-targets -- --deny warnings
 
@@ -64,8 +64,8 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
-            substituters = https://attic.candee.baby/canix https://cache.nixos.org
-            trusted-public-keys = canix:lPzPzKrmYqW5Rxa5r0uQWvCqD3S5nx0h2eCy7XD5JM8= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+            substituters = https://cache.nixos.org
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
       - run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
       - run: nix develop -c cargo test --workspace
 
@@ -80,8 +80,8 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
-            substituters = https://attic.candee.baby/canix https://cache.nixos.org
-            trusted-public-keys = canix:lPzPzKrmYqW5Rxa5r0uQWvCqD3S5nx0h2eCy7XD5JM8= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+            substituters = https://cache.nixos.org
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
       - run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
       - run: |
           db="${CARGO_HOME:-$HOME/.cargo}/advisory-db"
