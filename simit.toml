@@ -1,22 +1,6 @@
-[project]
-name = "sc"
-description = "SmartCool thermal control daemon"
-
 [ci]
+runtime = "nix"
 runner = "atlas-nix-trusted"
-
-[[ci.steps]]
-name = "nix-flake-check"
-run = "nix flake check"
-
-[[ci.steps]]
-name = "cargo-fmt"
-run = "nix develop -c cargo fmt --all -- --check"
-
-[[ci.steps]]
-name = "cargo-clippy"
-run = "nix develop -c cargo clippy --workspace --all-targets -- -D warnings"
-
-[[ci.steps]]
-name = "cargo-test"
-run = "nix develop -c cargo test --workspace"
+workspace = true
+with_audit = true
+with_deny = true

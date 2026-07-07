@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["**"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  nix-check:
+    runs-on: atlas-nix-trusted
+    env:
+      NIX_CONFIG: "experimental-features = nix-command flakes"
+      XDG_CACHE_HOME: "/tmp/.cache"
+      CARGO_HOME: "/tmp/.cargo"
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+      - run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+      - run: nix flake check
+
+  fmt:
+    needs: [nix-check]
+    runs-on: codeberg-tiny
+    env:
+      CARGO_HOME: "/tmp/.cargo"
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            substituters = https://attic.candee.baby/canix https://cache.nixos.org
+            trusted-public-keys = canix:lPzPzKrmYqW5Rxa5r0uQWvCqD3S5nx0h2eCy7XD5JM8= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+      - run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+      - run: nix develop -c cargo fmt --all -- --check
+
+  clippy:
+    needs: [nix-check]
+    runs-on: codeberg-small
+    env:
+      CARGO_HOME: "/tmp/.cargo"
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            substituters = https://attic.candee.baby/canix https://cache.nixos.org
+            trusted-public-keys = canix:lPzPzKrmYqW5Rxa5r0uQWvCqD3S5nx0h2eCy7XD5JM8= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+      - run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+      - run: nix develop -c cargo clippy --workspace --all-targets -- --deny warnings
+
+  test:
+    needs: [nix-check]
+    runs-on: codeberg-medium
+    env:
+      CARGO_HOME: "/tmp/.cargo"
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            substituters = https://attic.candee.baby/canix https://cache.nixos.org
+            trusted-public-keys = canix:lPzPzKrmYqW5Rxa5r0uQWvCqD3S5nx0h2eCy7XD5JM8= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+      - run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+      - run: nix develop -c cargo test --workspace
+
+  quality:
+    needs: [nix-check]
+    runs-on: codeberg-small
+    env:
+      CARGO_HOME: "/tmp/.cargo"
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+      - uses: https://github.com/cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            substituters = https://attic.candee.baby/canix https://cache.nixos.org
+            trusted-public-keys = canix:lPzPzKrmYqW5Rxa5r0uQWvCqD3S5nx0h2eCy7XD5JM8= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+      - run: echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+      - run: |
+          db="${CARGO_HOME:-$HOME/.cargo}/advisory-db"
+          rm -rf "$db"
+          mkdir -p "$(dirname "$db")"
+          git -c http.lowSpeedLimit=1024 -c http.lowSpeedTime=30 clone --depth 1 https://github.com/RustSec/advisory-db.git "$db"
+      - run: nix develop -c cargo audit --db "$db" --no-fetch --stale
+      - run: nix develop -c cargo deny check bans licenses sources
