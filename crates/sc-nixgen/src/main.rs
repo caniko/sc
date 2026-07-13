@@ -1,6 +1,7 @@
 mod benchmark;
 mod detect;
 mod emit;
+mod interrupt;
 mod optimize;
 mod pkl_format;
 mod stress;
@@ -8,6 +9,7 @@ mod stress;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "sc-nixgen", about = "Generate NixOS configs for SmartCool")]
@@ -53,6 +55,25 @@ enum Command {
         /// Minimum coupling |beta| to assign a sensor to a fan (C per +10 PWM)
         #[arg(long, default_value = "0.02")]
         coupling_threshold: f64,
+
+        /// Actually write PWM values and run stress testing. Without this
+        /// flag the command only prints the planned transaction.
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Inspect one detected fan, optionally running a short reversible PWM test.
+    Identify {
+        /// Auto-detected fan name (for example fan1 or gpu_fan)
+        #[arg(long)]
+        fan: String,
+
+        /// Seconds to hold manual control when --apply is used
+        #[arg(long, default_value = "5")]
+        duration: u64,
+
+        /// Actually take manual control and measure RPM; state is restored on exit.
+        #[arg(long)]
+        apply: bool,
     },
     /// Generate optimized NixOS config from an existing config + optional tuning data
     Generate {
@@ -108,6 +129,7 @@ fn main() -> Result<()> {
             output,
             generate_nix,
             coupling_threshold,
+            apply,
         } => {
             // Load topology
             let topo = benchmark::load_topology(&topology_path)?;
@@ -119,6 +141,18 @@ fn main() -> Result<()> {
             // Match detected fans to topology entries and resolve hwmon
             let (mut fans, sensors, sensor_names, config) =
                 benchmark::prepare_from_detect(&result, &topo)?;
+
+            if !apply {
+                eprintln!(
+                    "Dry run: resolved {} fan(s) and {} sensor(s); no PWM or stress writes were performed.",
+                    fans.len(),
+                    sensors.len()
+                );
+                eprintln!(
+                    "Re-run with --apply only after reviewing the topology and having a recovery path."
+                );
+                return Ok(());
+            }
 
             // Run benchmark with built-in stress
             let tuning = benchmark::run_benchmark(&mut fans, &sensors, &sensor_names, &topo)?;
@@ -147,6 +181,11 @@ fn main() -> Result<()> {
 
             Ok(())
         }
+        Command::Identify {
+            fan,
+            duration,
+            apply,
+        } => identify(&fan, duration, apply),
         Command::Generate {
             config: config_path,
             tuning: tuning_path,
@@ -172,6 +211,52 @@ fn main() -> Result<()> {
             write_output(&nix_output, output.as_deref())
         }
     }
+}
+
+fn identify(name: &str, duration: u64, apply: bool) -> Result<()> {
+    anyhow::ensure!(duration > 0, "duration must be greater than zero");
+    let result = sc_detect::detect_hardware(true)?;
+    let detected = result
+        .fans
+        .iter()
+        .find(|candidate| candidate.auto_name == name)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "fan '{}' was not detected; available fans: {}",
+                name,
+                result
+                    .fans
+                    .iter()
+                    .map(|candidate| candidate.auto_name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+    let mut controller =
+        sc_hwmon::fan::Fan::from_path(name, &detected.hwmon_path, detected.pwm_index)?;
+    let original_pwm = controller.read_pwm()?;
+    let original_rpm = controller.read_rpm().unwrap_or(0);
+
+    println!(
+        "{}: chip={} pwm{} current_pwm={} current_rpm={}",
+        name, detected.hwmon_chip, detected.pwm_index, original_pwm, original_rpm
+    );
+    if !apply {
+        println!(
+            "Dry run: no fan control writes were performed. Re-run with --apply to test this fan."
+        );
+        return Ok(());
+    }
+
+    let interrupt = interrupt::InterruptGuard::new()?;
+    let mut control = sc_hwmon::fan::FanControlGuard::new(std::slice::from_mut(&mut controller));
+    let fan = &mut control.fans_mut()[0];
+    fan.set_manual()?;
+    fan.write_pwm(255)?;
+    interrupt.sleep(Duration::from_secs(duration))?;
+    let rpm = fan.read_rpm()?;
+    println!("{}: measured_rpm={} at_pwm=255", name, rpm);
+    Ok(())
 }
 
 /// Remove fans from config that have zero coupling entries in tuning data.

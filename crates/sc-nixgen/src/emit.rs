@@ -10,6 +10,15 @@ pub fn emit_nix(
     optimized: &OptimizedConfig,
     tuning: Option<&TuningResponse>,
 ) -> String {
+    emit_nix_inner(config, optimized, tuning, true)
+}
+
+fn emit_nix_inner(
+    config: &Config,
+    optimized: &OptimizedConfig,
+    tuning: Option<&TuningResponse>,
+    enable: bool,
+) -> String {
     let mut out = String::new();
 
     // Header comment
@@ -67,7 +76,7 @@ pub fn emit_nix(
     let settings_nix = settings_to_nix(&settings);
 
     out.push_str("  services.smartcool = {\n");
-    out.push_str("    enable = true;\n");
+    out.push_str(&format!("    enable = {enable};\n"));
 
     // Indent the generated attrset to sit under services.smartcool.settings.
     let indented = indent_block(&settings_nix, 4);
@@ -102,7 +111,12 @@ pub fn emit_nix_from_detected(config: &Config) -> String {
             .collect(),
         has_tuning_data: false,
     };
-    emit_nix(config, &optimized, None)
+    let mut output = emit_nix_inner(config, &optimized, None, false);
+    output.insert_str(
+        0,
+        "# Detection is an unverified hardware inventory. Review topology and run sc-nixgen benchmark --apply before enabling SmartCool.\n",
+    );
+    output
 }
 
 /// Build a serializable settings struct from optimized config.
@@ -372,6 +386,10 @@ mod tests {
         assert!(nix.contains("WARNING: No tuning data"));
         assert!(nix.contains(r#"position = "front";"#));
         assert!(nix.contains(r#"direction = "intake";"#));
+
+        let detected = emit_nix_from_detected(&config);
+        assert!(detected.contains("Detection is an unverified hardware inventory"));
+        assert!(detected.contains("enable = false"));
     }
 
     #[test]

@@ -33,6 +33,8 @@ pub struct Fan {
     enable_path: PathBuf,
     /// The original pwm_enable value before we took control (for restore on shutdown)
     original_enable: u8,
+    /// The original pwm value before we took control (for restore on shutdown)
+    original_pwm: u8,
     /// Last PWM value written (to avoid redundant writes)
     last_pwm: Option<u8>,
 }
@@ -80,6 +82,7 @@ impl Fan {
 
         // Save the original enable mode for restoration on shutdown
         let original_enable: u8 = read_sysfs(&enable_path)?;
+        let original_pwm: u8 = read_sysfs(&pwm_path)?;
 
         Ok(Self {
             name: name.to_string(),
@@ -87,6 +90,7 @@ impl Fan {
             pwm_path,
             enable_path,
             original_enable,
+            original_pwm,
             last_pwm: None,
         })
     }
@@ -107,6 +111,7 @@ impl Fan {
         );
 
         let original_enable: u8 = read_sysfs(&enable_path)?;
+        let original_pwm: u8 = read_sysfs(&pwm_path)?;
 
         Ok(Self {
             name: name.to_string(),
@@ -114,6 +119,7 @@ impl Fan {
             pwm_path,
             enable_path,
             original_enable,
+            original_pwm,
             last_pwm: None,
         })
     }
@@ -130,7 +136,24 @@ impl Fan {
             mode = self.original_enable,
             "restoring original fan control mode"
         );
-        write_sysfs(&self.enable_path, &self.original_enable.to_string())
+        // Restore the duty cycle before handing control back to the kernel or
+        // firmware.  This avoids leaving a user-selected PWM behind when the
+        // original mode is manual or when a driver applies it immediately.
+        let mut errors = Vec::new();
+        if let Err(error) = write_sysfs(&self.pwm_path, &self.original_pwm.to_string()) {
+            errors.push(format!("PWM restoration failed: {error:#}"));
+        }
+        // Always attempt to restore the control mode, even when the PWM write
+        // was rejected by a driver.  Leaving a fan in manual mode is the more
+        // dangerous failure and must not be hidden behind the first error.
+        if let Err(error) = write_sysfs(&self.enable_path, &self.original_enable.to_string()) {
+            errors.push(format!("control-mode restoration failed: {error:#}"));
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!("fan '{}': {}", self.name, errors.join("; "))
+        }
     }
 
     /// Read current fan speed in RPM.
@@ -155,5 +178,64 @@ impl Fan {
         write_sysfs(&self.pwm_path, &pwm.to_string())?;
         self.last_pwm = Some(pwm);
         Ok(())
+    }
+}
+
+/// Owns a temporary manual-control session for one or more fans.
+///
+/// The benchmark and identification commands must never leave a machine in a
+/// mutated fan state when they fail.  Holding this guard for the whole
+/// transaction makes restoration unconditional on every normal return,
+/// `anyhow` error, and Rust panic.  The signal handler used by the CLI turns
+/// SIGINT/SIGTERM into an ordinary error so this drop path also runs for an
+/// interrupted operation.
+pub struct FanControlGuard<'a> {
+    fans: &'a mut [Fan],
+}
+
+impl<'a> FanControlGuard<'a> {
+    pub fn new(fans: &'a mut [Fan]) -> Self {
+        Self { fans }
+    }
+
+    pub fn fans_mut(&mut self) -> &mut [Fan] {
+        self.fans
+    }
+}
+
+impl Drop for FanControlGuard<'_> {
+    fn drop(&mut self) {
+        for fan in self.fans.iter() {
+            if let Err(error) = fan.restore_original() {
+                tracing::error!(fan = %fan.name, %error, "failed to restore fan state");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn guard_restores_pwm_and_enable_mode() {
+        let directory = tempfile::tempdir().unwrap();
+        let pwm = directory.path().join("pwm1");
+        let enable = directory.path().join("pwm1_enable");
+        fs::write(&pwm, "73").unwrap();
+        fs::write(&enable, "2").unwrap();
+
+        let mut fan = Fan::from_path("test", directory.path(), 1).unwrap();
+        {
+            let mut guard = FanControlGuard::new(std::slice::from_mut(&mut fan));
+            let fan = &mut guard.fans_mut()[0];
+            fan.set_manual().unwrap();
+            fan.write_pwm(201).unwrap();
+            assert_eq!(fs::read_to_string(&pwm).unwrap(), "201");
+        }
+
+        assert_eq!(fs::read_to_string(&pwm).unwrap(), "73");
+        assert_eq!(fs::read_to_string(&enable).unwrap(), "2");
     }
 }

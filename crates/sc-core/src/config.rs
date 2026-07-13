@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,10 +226,64 @@ fn validate(config: &Config) -> Result<()> {
         "derivative window_size must be >= 2"
     );
 
-    let sensor_names: Vec<&str> = config.sensors.iter().map(|s| s.name.as_str()).collect();
+    let mut sensor_names = HashSet::new();
+    for sensor in &config.sensors {
+        anyhow::ensure!(
+            !sensor.name.trim().is_empty(),
+            "sensor name must not be empty"
+        );
+        anyhow::ensure!(
+            !sensor.hwmon.trim().is_empty(),
+            "sensor '{}' has empty hwmon",
+            sensor.name
+        );
+        anyhow::ensure!(
+            sensor.index > 0,
+            "sensor '{}' index must be > 0",
+            sensor.name
+        );
+        anyhow::ensure!(
+            sensor_names.insert(sensor.name.as_str()),
+            "duplicate sensor name '{}'",
+            sensor.name
+        );
+    }
+
+    let mut fan_names = HashSet::new();
+    let mut fan_channels = HashSet::new();
 
     for fan in &config.fans {
-        anyhow::ensure!(!fan.curve.is_empty(), "fan '{}' has empty curve", fan.name);
+        anyhow::ensure!(!fan.name.trim().is_empty(), "fan name must not be empty");
+        anyhow::ensure!(
+            !fan.hwmon.trim().is_empty(),
+            "fan '{}' has empty hwmon",
+            fan.name
+        );
+        anyhow::ensure!(
+            fan.pwm_index > 0,
+            "fan '{}' pwm_index must be > 0",
+            fan.name
+        );
+        anyhow::ensure!(
+            fan_names.insert(fan.name.as_str()),
+            "duplicate fan name '{}'",
+            fan.name
+        );
+        anyhow::ensure!(
+            fan_channels.insert((&fan.hwmon, fan.hwmon_instance, fan.pwm_index)),
+            "fan '{}' shares its hwmon channel with another fan",
+            fan.name
+        );
+        anyhow::ensure!(
+            !fan.sensors.is_empty(),
+            "fan '{}' must reference at least one sensor",
+            fan.name
+        );
+        anyhow::ensure!(
+            fan.curve.len() >= 2,
+            "fan '{}' curve must contain at least two points",
+            fan.name
+        );
 
         // Verify curve is sorted by temperature
         for window in fan.curve.windows(2) {
@@ -237,12 +292,26 @@ fn validate(config: &Config) -> Result<()> {
                 "fan '{}' curve must be sorted by ascending temperature",
                 fan.name
             );
+            anyhow::ensure!(
+                window[0].pwm <= window[1].pwm,
+                "fan '{}' curve PWM must be non-decreasing",
+                fan.name
+            );
+        }
+
+        for point in &fan.curve {
+            anyhow::ensure!(
+                point.temp <= 150,
+                "fan '{}' curve temperature {}°C is outside the supported 0..=150°C range",
+                fan.name,
+                point.temp
+            );
         }
 
         // Verify all referenced sensors exist
         for sensor_ref in &fan.sensors {
             anyhow::ensure!(
-                sensor_names.contains(&sensor_ref.as_str()),
+                sensor_names.contains(sensor_ref.as_str()),
                 "fan '{}' references unknown sensor '{}'",
                 fan.name,
                 sensor_ref
@@ -279,6 +348,25 @@ mod tests {
         }
     }
 
+    fn test_config() -> Config {
+        Config {
+            poll_interval_ms: 2000,
+            derivative: DerivativeConfig {
+                window_size: 10,
+                boost_threshold: 2.0,
+                decay_rate: 0.5,
+            },
+            sensors: vec![SensorConfig {
+                name: "cpu".into(),
+                hwmon: "k10temp".into(),
+                index: 1,
+                hwmon_instance: None,
+            }],
+            fans: vec![test_fan()],
+            tuning: Default::default(),
+        }
+    }
+
     #[test]
     fn interpolate_below_curve() {
         let fan = test_fan();
@@ -302,6 +390,24 @@ mod tests {
         let fan = test_fan();
         // Midpoint between (45, 20) and (55, 40) → 30
         assert_eq!(fan.interpolate_pwm(50.0), 30);
+    }
+
+    #[test]
+    fn validation_rejects_non_monotonic_pwm() {
+        let mut config = test_config();
+        config.fans[0].curve[1].pwm = 10;
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(error.contains("PWM must be non-decreasing"));
+    }
+
+    #[test]
+    fn validation_rejects_duplicate_hardware_channel() {
+        let mut config = test_config();
+        let mut duplicate = test_fan();
+        duplicate.name = "second".into();
+        config.fans.push(duplicate);
+        let error = validate(&config).unwrap_err().to_string();
+        assert!(error.contains("shares its hwmon channel"));
     }
 
     #[test]

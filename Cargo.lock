@@ -1205,6 +1205,7 @@ name = "sc-hwmon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "tempfile",
  "tracing",
 ]
 
@@ -1220,6 +1221,7 @@ dependencies = [
  "sc-hwmon",
  "serde",
  "serde_json",
+ "signal-hook",
  "tempfile",
  "tokio",
 ]

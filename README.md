@@ -46,3 +46,10 @@ The flake exposes `nixosModules.default`. A host can import it and enable:
 ```
 
 Real deployments must provide host-specific sensors, fans, and conservative fan curves before enabling control.
+
+`sc-nixgen detect` and `sc-nixgen benchmark` are review-first commands:
+detection emits a disabled starter module, and benchmarking is read-only until
+`--apply` is explicitly supplied. `sc-nixgen identify --fan <name>` provides a
+single-channel inspection/test flow. Applied identification and benchmark
+transactions restore each fan's original PWM and control mode on exit,
+including interrupted or failed runs.

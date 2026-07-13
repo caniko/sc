@@ -7,3 +7,6 @@ description = "Sysfs hwmon interface — fan PWM control and temperature sensor 
 [dependencies]
 anyhow.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use std::path::Path;
-use std::thread;
 use std::time::Duration;
 
 use sc_core::config::{
@@ -9,9 +8,10 @@ use sc_core::config::{
 };
 use sc_core::ipc::{CouplingEntry, StepResponseEntry, TuningResponse};
 use sc_detect::DetectionResult;
-use sc_hwmon::fan::Fan;
+use sc_hwmon::fan::{Fan, FanControlGuard};
 use sc_hwmon::sensor::Sensor;
 
+use crate::interrupt::InterruptGuard;
 use crate::stress::StressProcess;
 
 /// PWM levels for the targeted sweep (low, mid, high, max).
@@ -475,7 +475,7 @@ fn default_curve() -> Vec<CurvePoint> {
 
 // ─── Adaptive settle detection ──────────────────────────────────────────────
 
-fn wait_for_settle(sensors: &[Sensor]) -> Vec<f64> {
+fn wait_for_settle(sensors: &[Sensor], interrupt: &InterruptGuard) -> Result<Vec<f64>> {
     let min_secs = 5;
     let max_secs = 20;
     let alpha_fast = 0.3;
@@ -490,6 +490,7 @@ fn wait_for_settle(sensors: &[Sensor]) -> Vec<f64> {
     let start = std::time::Instant::now();
 
     loop {
+        interrupt.check()?;
         let elapsed = start.elapsed().as_secs();
         let temps: Vec<f64> = sensors
             .iter()
@@ -515,15 +516,15 @@ fn wait_for_settle(sensors: &[Sensor]) -> Vec<f64> {
                 .fold(0.0f64, f64::max);
 
             if max_diff < convergence_threshold {
-                return temps;
+                return Ok(temps);
             }
         }
 
         if elapsed >= max_secs {
-            return temps;
+            return Ok(temps);
         }
 
-        thread::sleep(Duration::from_millis(POLL_MS));
+        interrupt.sleep(Duration::from_millis(POLL_MS))?;
     }
 }
 
@@ -535,14 +536,16 @@ fn wait_for_stress_warmup(
     target_prefix: &str,
     baseline: &[f64],
     min_rise_c: f64,
-) {
+    interrupt: &InterruptGuard,
+) -> Result<()> {
     let start = std::time::Instant::now();
     let timeout = Duration::from_secs(STRESS_WARMUP_SECS);
 
     loop {
+        interrupt.check()?;
         if start.elapsed() >= timeout {
             eprintln!("  warmup timeout ({}s)", STRESS_WARMUP_SECS);
-            return;
+            return Ok(());
         }
 
         let temps: Vec<f64> = sensors
@@ -565,41 +568,46 @@ fn wait_for_stress_warmup(
                 max_rise,
                 start.elapsed().as_secs_f64()
             );
-            return;
+            return Ok(());
         }
 
-        thread::sleep(Duration::from_millis(POLL_MS));
+        interrupt.sleep(Duration::from_millis(POLL_MS))?;
     }
 }
 
-fn sample_temps(sensors: &[Sensor], duration_secs: u64) -> Vec<f64> {
+fn sample_temps(
+    sensors: &[Sensor],
+    duration_secs: u64,
+    interrupt: &InterruptGuard,
+) -> Result<Vec<f64>> {
     let n_samples = (duration_secs * 1000 / POLL_MS) as usize;
     let mut accumulators = vec![0.0f64; sensors.len()];
 
     for _ in 0..n_samples {
+        interrupt.check()?;
         for (j, sensor) in sensors.iter().enumerate() {
             if let Ok(temp) = sensor.read_temp_c() {
                 accumulators[j] += temp;
             }
         }
-        thread::sleep(Duration::from_millis(POLL_MS));
+        interrupt.sleep(Duration::from_millis(POLL_MS))?;
     }
 
-    accumulators
+    Ok(accumulators
         .iter()
         .map(|acc| acc / n_samples as f64)
-        .collect()
+        .collect())
 }
 
 // ─── Stall detection ────────────────────────────────────────────────────────
 
-fn find_stall_threshold(fan: &mut Fan) -> Result<u8> {
+fn find_stall_threshold(fan: &mut Fan, interrupt: &InterruptGuard) -> Result<u8> {
     let mut lo: u8 = 0;
     let mut hi: u8 = 80;
     let mut stall_pwm: u8 = 0;
 
     let actual_hi = write_pwm_safe(fan, hi)?;
-    thread::sleep(Duration::from_secs(3));
+    interrupt.sleep(Duration::from_secs(3))?;
     let rpm = fan.read_rpm().unwrap_or(0);
     if rpm == 0 {
         return Ok(0);
@@ -610,7 +618,7 @@ fn find_stall_threshold(fan: &mut Fan) -> Result<u8> {
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
         let actual = write_pwm_safe(fan, mid)?;
-        thread::sleep(Duration::from_secs(2));
+        interrupt.sleep(Duration::from_secs(2))?;
         let rpm = fan.read_rpm().unwrap_or(0);
 
         if rpm > 0 {
@@ -650,6 +658,13 @@ pub fn run_benchmark(
     sensor_names: &[String],
     topo: &Topology,
 ) -> Result<TuningResponse> {
+    let interrupt = InterruptGuard::new()?;
+    // Keep the guard alive for the complete benchmark.  Every PWM write and
+    // every early-return path is therefore followed by restoration of the
+    // original PWM and enable mode.
+    let mut control = FanControlGuard::new(fans);
+    let fans = control.fans_mut();
+
     let classified = classify_fans(topo)?;
     let n_sweepable = classified
         .iter()
@@ -677,6 +692,7 @@ pub fn run_benchmark(
 
     let mut controllable: Vec<bool> = Vec::new();
     for fan in fans.iter_mut() {
+        interrupt.check()?;
         if let Err(e) = fan.set_manual() {
             eprintln!(
                 "  fan '{}': cannot set manual mode ({}), skipping",
@@ -692,7 +708,6 @@ pub fn run_benchmark(
                     "  fan '{}': driver rejects PWM writes, skipping (firmware-controlled?)",
                     fan.name
                 );
-                let _ = fan.restore_original();
                 controllable.push(false);
             }
         }
@@ -710,12 +725,13 @@ pub fn run_benchmark(
     let mut stall_thresholds: std::collections::HashMap<String, u8> =
         std::collections::HashMap::new();
     for (fan, &is_ctrl) in fans.iter_mut().zip(controllable.iter()) {
+        interrupt.check()?;
         if !is_ctrl {
             eprintln!("  {} ... skipped (not controllable)", fan.name);
             continue;
         }
         eprint!("  {} ... ", fan.name);
-        let stall = find_stall_threshold(fan)?;
+        let stall = find_stall_threshold(fan, &interrupt)?;
         eprintln!("stall PWM = {}", stall);
         stall_thresholds.insert(fan.name.clone(), stall);
         write_pwm_safe(fan, 0)?;
@@ -729,8 +745,8 @@ pub fn run_benchmark(
             write_pwm_safe(fan, 255)?;
         }
     }
-    wait_for_settle(sensors);
-    let baseline = sample_temps(sensors, 3);
+    wait_for_settle(sensors, &interrupt)?;
+    let baseline = sample_temps(sensors, 3, &interrupt)?;
     eprintln!("Baseline temperatures (full cooling):");
     for (i, name) in sensor_names.iter().enumerate() {
         eprintln!("  {} = {:.1}°C", name, baseline[i]);
@@ -750,6 +766,7 @@ pub fn run_benchmark(
             &controllable,
             &stall_thresholds,
             &baseline,
+            &interrupt,
             "cpu",
             StressProcess::start_cpu,
         )?;
@@ -766,21 +783,11 @@ pub fn run_benchmark(
             &controllable,
             &stall_thresholds,
             &baseline,
+            &interrupt,
             "gpu",
             StressProcess::start_gpu,
         )?;
         all_measurements.extend(phase_measurements);
-    }
-
-    // ── Restore all fans ────────────────────────────────────────────────────
-
-    eprintln!("\nRestoring fan control modes...");
-    for (fan, &is_ctrl) in fans.iter().zip(controllable.iter()) {
-        if is_ctrl {
-            if let Err(e) = fan.restore_original() {
-                eprintln!("  warning: failed to restore {}: {}", fan.name, e);
-            }
-        }
     }
 
     // ── Compute coupling matrix ─────────────────────────────────────────────
@@ -808,6 +815,7 @@ fn run_stress_phase<F>(
     controllable: &[bool],
     stall_thresholds: &std::collections::HashMap<String, u8>,
     baseline: &[f64],
+    interrupt: &InterruptGuard,
     target_prefix: &str,
     start_stress: F,
 ) -> Result<Vec<PhaseMeasurement>>
@@ -826,10 +834,17 @@ where
 
     // Wait for target temps to rise
     eprintln!("  Waiting for {} temps to rise...", target_prefix);
-    wait_for_stress_warmup(sensors, sensor_names, target_prefix, baseline, 5.0);
+    wait_for_stress_warmup(
+        sensors,
+        sensor_names,
+        target_prefix,
+        baseline,
+        5.0,
+        interrupt,
+    )?;
 
     // Sample stressed baseline (at max fan speed)
-    let stressed_baseline = sample_temps(sensors, 3);
+    let stressed_baseline = sample_temps(sensors, 3, interrupt)?;
     eprintln!("  Stressed temperatures (fans at max):");
     for (i, name) in sensor_names.iter().enumerate() {
         if name.starts_with(target_prefix) {
@@ -846,6 +861,7 @@ where
     let mut measurements = Vec::new();
 
     for (fan_idx, cf) in classified.iter().enumerate() {
+        interrupt.check()?;
         if !controllable[fan_idx] {
             continue;
         }
@@ -880,13 +896,14 @@ where
         };
 
         for &pwm in &effective_levels {
+            interrupt.check()?;
             eprint!("    PWM={:>3} ... ", pwm);
             write_pwm_safe(&mut fans[fan_idx], pwm)?;
 
             // Shorter settle during stress — temps move faster under load
-            wait_for_settle(sensors);
+            wait_for_settle(sensors, interrupt)?;
 
-            let temps = sample_temps(sensors, STRESS_SAMPLE_SECS);
+            let temps = sample_temps(sensors, STRESS_SAMPLE_SECS, interrupt)?;
 
             // Print only target sensors
             let temp_str: Vec<String> = sensor_names
@@ -919,7 +936,7 @@ where
             write_pwm_safe(fan, 255)?;
         }
     }
-    thread::sleep(Duration::from_secs(10));
+    interrupt.sleep(Duration::from_secs(10))?;
 
     Ok(measurements)
 }
