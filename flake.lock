@@ -856,12 +856,13 @@
         "rev": "9bfa8bdb0ecb22d7bc11448665f7fbaebae7a759",
         "revCount": 134,
         "type": "git",
-        "url": "ssh://git@codeberg.org/caniko/rs-harbor.git"
+        "url": "https://codeberg.org/caniko/rs-harbor.git"
       },
       "original": {
         "ref": "trunk",
+        "rev": "9bfa8bdb0ecb22d7bc11448665f7fbaebae7a759",
         "type": "git",
-        "url": "ssh://git@codeberg.org/caniko/rs-harbor.git"
+        "url": "https://codeberg.org/caniko/rs-harbor.git"
       }
     },
     "rust-overlay": {
