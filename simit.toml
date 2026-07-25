@@ -4,3 +4,10 @@ runner = "codeberg-medium"
 workspace = true
 with_audit = true
 with_deny = true
+provider = "actions"
+platform = "forgejo"
+
+[ci.pages]
+repo = "caniko/sc"
+token_secret = "CODEBERG_TOKEN"
+source_branch = "main"

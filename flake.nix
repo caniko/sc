@@ -212,7 +212,7 @@
       }
       // moduleChecks;
   in {
-    overlays.default = final: _prev: mkPackages final.system;
+    overlays.default = final: _prev: mkPackages final.stdenv.hostPlatform.system;
 
     packages = forSystems (system: mkPackages system);
 
