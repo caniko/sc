@@ -1,10 +1,10 @@
 [ci]
 runtime = "nix"
-runner = "codeberg-medium"
+runner = "codefloe-global"
 workspace = true
 with_audit = true
 with_deny = true
-provider = "actions"
+provider = "crow"
 platform = "forgejo"
 
 [ci.pages]
