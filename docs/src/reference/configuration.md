@@ -15,8 +15,8 @@ Top-level fields:
 `derivative` fields:
 
 - `window_size`: rolling sample window. Must be at least `2`.
-- `boost_threshold`: temperature rise threshold in C/s that triggers proactive PWM boost.
-- `decay_rate`: PWM units per tick used to relax derivative boost.
+- `boost_threshold`: finite, non-negative temperature rise threshold in C/s that triggers proactive PWM boost.
+- `decay_rate`: finite, non-negative PWM units per tick used to relax derivative boost.
 
 Each sensor has:
 
@@ -41,9 +41,12 @@ Supported airflow directions are `intake` and `exhaust`.
 
 Curve validation requires:
 
-- Every fan curve has at least one point.
+- Every fan curve has at least two points.
 - Curve temperatures are strictly ascending.
+- Curve PWM values are non-decreasing.
 - Every sensor referenced by a fan exists in `sensors`.
+
+If any sensor linked to a fan is unavailable or outside `0<temp<=150C`, the daemon commands that fan to PWM `255` until every linked sensor is valid again.
 
 Tuning defaults:
 
@@ -53,3 +56,5 @@ Tuning defaults:
 - `step_threshold = 15`
 - `response_window = 60`
 - `regression_min_samples = 60`
+
+All tuning sizes must be nonzero, `response_window` must be at least `5`, and `ccf_buffer_size` must be at least `ccf_max_lag + 10`.

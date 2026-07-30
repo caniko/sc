@@ -700,12 +700,12 @@ impl ThermalSystem {
 
         // 2. Update cross-correlators
         for corr in &mut self.correlators {
-            let pwm = fan_pwms
-                .get(&corr.fan_name)
-                .map(|&v| v as f64)
-                .unwrap_or(0.0);
-            let temp = sensor_temps.get(&corr.sensor_name).copied().unwrap_or(0.0);
-            corr.update(pwm, temp);
+            if let (Some(&pwm), Some(&temp)) = (
+                fan_pwms.get(&corr.fan_name),
+                sensor_temps.get(&corr.sensor_name),
+            ) {
+                corr.update(pwm as f64, temp);
+            }
         }
 
         // 3. Update step detector

@@ -256,6 +256,9 @@ fn identify(name: &str, duration: u64, apply: bool) -> Result<()> {
     interrupt.sleep(Duration::from_secs(duration))?;
     let rpm = fan.read_rpm()?;
     println!("{}: measured_rpm={} at_pwm=255", name, rpm);
+    control
+        .restore()
+        .context("failed to restore fan control after identification")?;
     Ok(())
 }
 

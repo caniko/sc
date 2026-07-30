@@ -225,6 +225,40 @@ fn validate(config: &Config) -> Result<()> {
         config.derivative.window_size >= 2,
         "derivative window_size must be >= 2"
     );
+    anyhow::ensure!(
+        config.derivative.boost_threshold.is_finite() && config.derivative.boost_threshold >= 0.0,
+        "derivative boost_threshold must be finite and >= 0"
+    );
+    anyhow::ensure!(
+        config.derivative.decay_rate.is_finite() && config.derivative.decay_rate >= 0.0,
+        "derivative decay_rate must be finite and >= 0"
+    );
+    anyhow::ensure!(config.tuning.ewma_span > 0, "tuning ewma_span must be > 0");
+    anyhow::ensure!(
+        config.tuning.ccf_buffer_size > 0,
+        "tuning ccf_buffer_size must be > 0"
+    );
+    let minimum_ccf_buffer = config
+        .tuning
+        .ccf_max_lag
+        .checked_add(10)
+        .ok_or_else(|| anyhow::anyhow!("tuning ccf_max_lag is too large"))?;
+    anyhow::ensure!(
+        config.tuning.ccf_buffer_size >= minimum_ccf_buffer,
+        "tuning ccf_buffer_size must be at least ccf_max_lag + 10"
+    );
+    anyhow::ensure!(
+        config.tuning.step_threshold > 0,
+        "tuning step_threshold must be > 0"
+    );
+    anyhow::ensure!(
+        config.tuning.response_window >= 5,
+        "tuning response_window must be >= 5"
+    );
+    anyhow::ensure!(
+        config.tuning.regression_min_samples > 0,
+        "tuning regression_min_samples must be > 0"
+    );
 
     let mut sensor_names = HashSet::new();
     for sensor in &config.sensors {
@@ -408,6 +442,48 @@ mod tests {
         config.fans.push(duplicate);
         let error = validate(&config).unwrap_err().to_string();
         assert!(error.contains("shares its hwmon channel"));
+    }
+
+    #[test]
+    fn validation_rejects_unsafe_tuning_values() {
+        let mut config = test_config();
+        config.tuning.ccf_buffer_size = 0;
+        assert!(validate(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("ccf_buffer_size"));
+
+        let mut config = test_config();
+        config.tuning.ccf_buffer_size = 20;
+        config.tuning.ccf_max_lag = 11;
+        assert!(validate(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("ccf_max_lag + 10"));
+
+        let mut config = test_config();
+        config.tuning.response_window = 0;
+        assert!(validate(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("response_window"));
+    }
+
+    #[test]
+    fn validation_rejects_non_finite_derivative_values() {
+        let mut config = test_config();
+        config.derivative.boost_threshold = f64::NAN;
+        assert!(validate(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("boost_threshold"));
+
+        let mut config = test_config();
+        config.derivative.decay_rate = f64::INFINITY;
+        assert!(validate(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("decay_rate"));
     }
 
     #[test]

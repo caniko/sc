@@ -61,7 +61,15 @@ impl StressProcess {
             );
         }
 
-        let mut originals = Vec::new();
+        let mut process = Self {
+            inner: StressInner::Gpu {
+                originals: Vec::new(),
+            },
+            label: format!("GPU stress ({} cards)", gpu_cards.len()),
+        };
+        let StressInner::Gpu { originals } = &mut process.inner else {
+            unreachable!()
+        };
 
         for card_path in &gpu_cards {
             let perf_path = card_path.join("device/power_dpm_force_performance_level");
@@ -71,6 +79,7 @@ impl StressProcess {
                 .with_context(|| format!("failed to read {}", perf_path.display()))?
                 .trim()
                 .to_string();
+            originals.push((perf_path.clone(), original.clone()));
 
             // Force max clocks
             std::fs::write(&perf_path, "high")
@@ -81,8 +90,6 @@ impl StressProcess {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             eprintln!("  {} forced to max clocks (was: {})", card_name, original);
-
-            originals.push((perf_path, original));
         }
 
         eprintln!(
@@ -90,14 +97,11 @@ impl StressProcess {
             originals.len()
         );
 
-        Ok(Self {
-            inner: StressInner::Gpu { originals },
-            label: format!("GPU stress ({} cards)", gpu_cards.len()),
-        })
+        Ok(process)
     }
 
     /// Stop the stress workload.
-    pub fn stop(&mut self) {
+    pub fn stop(&mut self) -> Result<()> {
         match &mut self.inner {
             StressInner::Cpu { running, handles } => {
                 running.store(false, Ordering::Relaxed);
@@ -106,20 +110,33 @@ impl StressProcess {
                 }
             }
             StressInner::Gpu { originals } => {
-                for (path, original) in originals.drain(..) {
-                    if let Err(e) = std::fs::write(&path, &original) {
-                        eprintln!("  warning: failed to restore {}: {}", path.display(), e);
+                let mut errors = Vec::new();
+                originals.retain(|(path, original)| {
+                    if let Err(error) = std::fs::write(path, original) {
+                        errors.push(format!("{}: {error}", path.display()));
+                        true
+                    } else {
+                        false
                     }
+                });
+                if !errors.is_empty() {
+                    anyhow::bail!(
+                        "failed to restore GPU performance levels: {}",
+                        errors.join("; ")
+                    )
                 }
             }
         }
         eprintln!("Stopped {}", self.label);
+        Ok(())
     }
 }
 
 impl Drop for StressProcess {
     fn drop(&mut self) {
-        self.stop();
+        if let Err(error) = self.stop() {
+            eprintln!("  warning: {}", error);
+        }
     }
 }
 
@@ -201,4 +218,26 @@ fn find_amdgpu_cards() -> Result<Vec<PathBuf>> {
 
     cards.sort();
     Ok(cards)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gpu_stop_restores_every_path_and_reports_failures() {
+        let directory = tempfile::tempdir().unwrap();
+        let good = directory.path().join("good");
+        let bad = directory.path().join("missing/bad");
+        std::fs::write(&good, "high").unwrap();
+        let mut process = StressProcess {
+            inner: StressInner::Gpu {
+                originals: vec![(good.clone(), "auto".into()), (bad, "auto".into())],
+            },
+            label: "test".into(),
+        };
+
+        assert!(process.stop().is_err());
+        assert_eq!(std::fs::read_to_string(good).unwrap(), "auto");
+    }
 }

@@ -191,23 +191,43 @@ impl Fan {
 /// interrupted operation.
 pub struct FanControlGuard<'a> {
     fans: &'a mut [Fan],
+    restored: bool,
 }
 
 impl<'a> FanControlGuard<'a> {
     pub fn new(fans: &'a mut [Fan]) -> Self {
-        Self { fans }
+        Self {
+            fans,
+            restored: false,
+        }
     }
 
     pub fn fans_mut(&mut self) -> &mut [Fan] {
+        self.restored = false;
         self.fans
+    }
+
+    pub fn restore(&mut self) -> Result<()> {
+        let mut errors = Vec::new();
+        for fan in self.fans.iter() {
+            if let Err(error) = fan.restore_original() {
+                errors.push(format!("{}: {error:#}", fan.name));
+            }
+        }
+        if errors.is_empty() {
+            self.restored = true;
+            Ok(())
+        } else {
+            anyhow::bail!("failed to restore fan state: {}", errors.join("; "))
+        }
     }
 }
 
 impl Drop for FanControlGuard<'_> {
     fn drop(&mut self) {
-        for fan in self.fans.iter() {
-            if let Err(error) = fan.restore_original() {
-                tracing::error!(fan = %fan.name, %error, "failed to restore fan state");
+        if !self.restored {
+            if let Err(error) = self.restore() {
+                tracing::error!(%error, "failed to restore fan state");
             }
         }
     }
@@ -237,5 +257,37 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&pwm).unwrap(), "73");
         assert_eq!(fs::read_to_string(&enable).unwrap(), "2");
+    }
+
+    #[test]
+    fn guard_restores_every_fan_during_error() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        for directory in [first.path(), second.path()] {
+            fs::write(directory.join("pwm1"), "73").unwrap();
+            fs::write(directory.join("pwm1_enable"), "5").unwrap();
+        }
+
+        let mut fans = vec![
+            Fan::from_path("first", first.path(), 1).unwrap(),
+            Fan::from_path("second", second.path(), 1).unwrap(),
+        ];
+        let result = (|| -> Result<()> {
+            let mut guard = FanControlGuard::new(&mut fans);
+            for fan in guard.fans_mut() {
+                fan.set_manual().unwrap();
+                fan.write_pwm(200).unwrap();
+            }
+            anyhow::bail!("injected failure")
+        })();
+
+        assert!(result.is_err());
+        for directory in [first.path(), second.path()] {
+            assert_eq!(fs::read_to_string(directory.join("pwm1")).unwrap(), "73");
+            assert_eq!(
+                fs::read_to_string(directory.join("pwm1_enable")).unwrap(),
+                "5"
+            );
+        }
     }
 }

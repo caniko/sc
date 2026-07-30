@@ -492,10 +492,7 @@ fn wait_for_settle(sensors: &[Sensor], interrupt: &InterruptGuard) -> Result<Vec
     loop {
         interrupt.check()?;
         let elapsed = start.elapsed().as_secs();
-        let temps: Vec<f64> = sensors
-            .iter()
-            .map(|s| s.read_temp_c().unwrap_or(0.0))
-            .collect();
+        let temps = read_temperatures(sensors)?;
 
         if !initialized {
             ewma_fast = temps.clone();
@@ -548,10 +545,7 @@ fn wait_for_stress_warmup(
             return Ok(());
         }
 
-        let temps: Vec<f64> = sensors
-            .iter()
-            .map(|s| s.read_temp_c().unwrap_or(0.0))
-            .collect();
+        let temps = read_temperatures(sensors)?;
 
         // Check if any target sensor has risen enough
         let mut max_rise = 0.0f64;
@@ -586,9 +580,9 @@ fn sample_temps(
     for _ in 0..n_samples {
         interrupt.check()?;
         for (j, sensor) in sensors.iter().enumerate() {
-            if let Ok(temp) = sensor.read_temp_c() {
-                accumulators[j] += temp;
-            }
+            accumulators[j] += sensor
+                .read_temp_c()
+                .with_context(|| format!("failed to read sensor '{}'", sensor.name))?;
         }
         interrupt.sleep(Duration::from_millis(POLL_MS))?;
     }
@@ -597,6 +591,17 @@ fn sample_temps(
         .iter()
         .map(|acc| acc / n_samples as f64)
         .collect())
+}
+
+fn read_temperatures(sensors: &[Sensor]) -> Result<Vec<f64>> {
+    sensors
+        .iter()
+        .map(|sensor| {
+            sensor
+                .read_temp_c()
+                .with_context(|| format!("failed to read sensor '{}'", sensor.name))
+        })
+        .collect()
 }
 
 // ─── Stall detection ────────────────────────────────────────────────────────
@@ -797,6 +802,9 @@ pub fn run_benchmark(
         "\nBenchmark complete. {} coupling entries.",
         tuning.coupling_matrix.len()
     );
+    control
+        .restore()
+        .context("failed to restore fan control after benchmark")?;
 
     Ok(tuning)
 }
@@ -927,7 +935,7 @@ where
     }
 
     // Stop stress
-    stress.stop();
+    stress.stop().context("failed to stop stress workload")?;
 
     // Brief cooldown
     eprintln!("  Cooling down...");

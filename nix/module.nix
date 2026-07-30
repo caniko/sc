@@ -6,8 +6,7 @@
 }: let
   cfg = config.services.smartcool;
 
-  pklString = value:
-    "\"${builtins.replaceStrings ["\\" "\"" "\n" "\r" "\t"] ["\\\\" "\\\"" "\\n" "\\r" "\\t"] value}\"";
+  pklString = value: "\"${builtins.replaceStrings ["\\" "\"" "\n" "\r" "\t"] ["\\\\" "\\\"" "\\n" "\\r" "\\t"] value}\"";
 
   pklKey = key:
     if builtins.match "[A-Za-z_][A-Za-z0-9_]*" key != null
@@ -71,17 +70,52 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = !config.services.thinkfan.enable;
+        message = "services.smartcool and services.thinkfan cannot be enabled together";
+      }
+    ];
+
     environment.etc."smartcool/config.pkl".text = pklModule cfg.settings + "\n";
 
-    systemd.services.smartcool = {
-      description = "SmartCool fan control daemon";
-      wantedBy = ["multi-user.target"];
-      after = ["local-fs.target"];
-      serviceConfig = {
-        Type = "notify";
-        ExecStart = "${cfg.package}/bin/sc daemon -c /etc/smartcool/config.pkl";
-        Restart = "on-failure";
-        RuntimeDirectory = "smartcool";
+    systemd.services = {
+      smartcool = {
+        description = "SmartCool fan control daemon";
+        wantedBy = ["multi-user.target"];
+        after = ["local-fs.target"];
+        conflicts = ["thinkfan.service"];
+        serviceConfig = {
+          Type = "notify";
+          NotifyAccess = "main";
+          ExecStart = "${cfg.package}/bin/sc daemon -c /etc/smartcool/config.pkl";
+          Restart = "on-failure";
+          RestartSec = "1s";
+          RuntimeDirectory = "smartcool";
+          PrivateNetwork = true;
+          WatchdogSec = "${toString (lib.max 10000 ((cfg.settings.poll_interval_ms or 2000) * 3))}ms";
+        };
+      };
+
+      smartcool-sleep = {
+        description = "Release SmartCool fan control before sleep";
+        wantedBy = ["sleep.target"];
+        before = ["sleep.target"];
+        serviceConfig.Type = "oneshot";
+        script = "${config.systemd.package}/bin/systemctl stop smartcool.service";
+      };
+
+      smartcool-wakeup = {
+        description = "Restart SmartCool fan control after waking";
+        wantedBy = ["sleep.target"];
+        after = [
+          "suspend.target"
+          "suspend-then-hibernate.target"
+          "hybrid-sleep.target"
+          "hibernate.target"
+        ];
+        serviceConfig.Type = "oneshot";
+        script = "${config.systemd.package}/bin/systemctl start smartcool.service";
       };
     };
   };
