@@ -2,6 +2,7 @@
 name = "sc-detect"
 version.workspace = true
 edition.workspace = true
+publish = false
 description = "Hardware discovery for SmartCool — hwmon chip enumeration, sensor/fan detection"
 
 [dependencies]

@@ -1,10 +1,10 @@
 [workspace]
 members = [
-    "crates/sc-core",
-    "crates/sc-detect",
-    "crates/sc-hwmon",
-    "crates/sc",
-    "crates/sc-nixgen",
+  "crates/sc-core",
+  "crates/sc-detect",
+  "crates/sc-hwmon",
+  "crates/sc",
+  "crates/sc-nixgen",
 ]
 resolver = "2"
 

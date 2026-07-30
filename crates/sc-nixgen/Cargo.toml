@@ -2,6 +2,7 @@
 name = "sc-nixgen"
 version.workspace = true
 edition.workspace = true
+publish = false
 description = "Generate optimized NixOS configs from SmartCool tuning data"
 
 [[bin]]

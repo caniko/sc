@@ -57,10 +57,3 @@ steps:
   environment:
     CARGO_HOME: /tmp/.cargo
     NIX_CONFIG: experimental-features = nix-command flakes
-- name: cargo-package
-  image: ghcr.io/cachix/devenv:latest
-  commands:
-  - nix develop -c cargo package --allow-dirty --list -p sc-nixgen
-  environment:
-    CARGO_HOME: /tmp/.cargo
-    NIX_CONFIG: experimental-features = nix-command flakes

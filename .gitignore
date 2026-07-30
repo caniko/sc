@@ -1,5 +1,7 @@
 /target
+/result
 docs/book/
 website/public/
 .plinth-project/
 dist/plinth-project/
+.pre-commit-config.yaml

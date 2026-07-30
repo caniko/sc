@@ -1,3 +1,28 @@
+[flake]
+scope = "full"
+mode = "custom"
+toolchain_binding = "toolchain"
+crane_lib_binding = "craneLib"
+package_binding = "packages.smartcool"
+components = ["treefmt", "nix-flake-check"]
+
+[flake.expected_outputs]
+packages = ["default", "smartcool", "sc-nixgen", "docs", "site"]
+dev_shells = ["default", "docs"]
+checks = [
+  "smartcool",
+  "sc-nixgen",
+  "pkl-validate",
+  "cargo-test",
+  "cargo-clippy",
+  "cargo-fmt",
+  "formatting",
+  "module-daemon",
+  "cli-runnable",
+  "pre-commit",
+]
+top_level = ["nixosModules"]
+
 [ci]
 runtime = "nix"
 runner = "codefloe-global"
@@ -6,8 +31,3 @@ with_audit = true
 with_deny = true
 provider = "crow"
 platform = "forgejo"
-
-[ci.pages]
-repo = "caniko/sc"
-token_secret = "CODEBERG_TOKEN"
-source_branch = "main"

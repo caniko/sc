@@ -2,6 +2,7 @@
 name = "sc-hwmon"
 version.workspace = true
 edition.workspace = true
+publish = false
 description = "Sysfs hwmon interface — fan PWM control and temperature sensor reading"
 
 [dependencies]

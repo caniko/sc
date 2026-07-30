@@ -3,6 +3,7 @@ name = "sc-core"
 version.workspace = true
 edition.workspace = true
 description = "Shared types and IPC client for SmartCool fan control"
+publish = false
 
 [dependencies]
 anyhow.workspace = true
