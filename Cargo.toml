@@ -30,3 +30,4 @@ tempfile = "3"
 tokio = { version = "1", features = ["rt", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zbus = { version = "5", features = ["blocking-api"] }

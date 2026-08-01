@@ -67,3 +67,8 @@ detection emits a disabled starter module, and benchmarking is read-only until
 single-channel inspection/test flow. Applied identification and benchmark
 transactions restore each fan's original PWM and control mode on exit,
 including interrupted or failed runs.
+
+`sc asusd` separately discovers, previews, transactionally applies, and resets
+ASUS firmware fan curves over D-Bus. The independent
+`services.smartcool.asusd` NixOS option configures those curves without enabling
+SmartCool's live hwmon daemon.

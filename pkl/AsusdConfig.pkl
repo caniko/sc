@@ -1,0 +1,13 @@
+class FanCurve {
+  fan: "CPU" | "GPU" | "MID"
+  temp: Listing<UInt>
+  pwm: Listing<UInt>
+  enabled: Boolean = true
+}
+
+class Profile {
+  name: "balanced" | "performance" | "quiet" | "low_power" | "custom"
+  curves: Listing<FanCurve>
+}
+
+profiles: Listing<Profile>

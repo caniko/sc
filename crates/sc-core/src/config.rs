@@ -197,7 +197,7 @@ pub fn load(path: &Path) -> Result<Config> {
     Ok(config)
 }
 
-fn load_pkl<T>(path: &Path) -> Result<T>
+pub(crate) fn load_pkl<T>(path: &Path) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
 {

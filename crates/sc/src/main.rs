@@ -1,3 +1,4 @@
+mod asusd;
 mod controller;
 mod display;
 mod ipc_server;
@@ -34,6 +35,11 @@ enum Command {
         #[arg(long)]
         validate: PathBuf,
     },
+    /// Inspect or manage firmware fan curves through asusd
+    Asusd {
+        #[command(subcommand)]
+        command: asusd::Command,
+    },
 }
 
 fn main() -> Result<()> {
@@ -67,5 +73,6 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
+        Command::Asusd { command } => asusd::run(command),
     }
 }
