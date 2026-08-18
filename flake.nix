@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     crane.url = "github:ipetkov/crane";
-    nix-pklx.url = "git+https://codeberg.org/caniko/nix-pklx.git";
+    nix-pklx.url = "git+https://github.com/caniko/nix-pklx.git";
     plinth = {
       url = "git+https://codeberg.org/caniko/plinth";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -13,7 +13,7 @@
     };
 
     rs-harbor = {
-      url = "git+ssh://git@codeberg.org/caniko/rs-harbor.git?ref=trunk&rev=f209ddbca3fdbb0dc31fa3886ccc2ff7369c18ac";
+      url = "git+https://github.com/caniko/rs-harbor.git?ref=trunk&rev=f209ddbca3fdbb0dc31fa3886ccc2ff7369c18ac";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.crane.follows = "crane";
       inputs.rust-overlay.follows = "rust-overlay";
