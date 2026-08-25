@@ -852,9 +852,9 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "pklr"
-version = "1.1.3"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4939ca3bd71134b13396475c01363ae1a118af4fa4f03dfb449ed6070c119d45"
+checksum = "99ab94255766d794e87b3b5b23af9978f582d6a7409e080f014c4aba6c3c6f10"
 dependencies = [
  "async-recursion",
  "indexmap",
@@ -862,14 +862,14 @@ dependencies = [
  "reqwest",
  "serde_json",
  "thiserror",
- "tokio",
+ "url",
  "zip",
 ]
 
 [[package]]
 name = "pklx"
 version = "0.1.0"
-source = "git+https://codeberg.org/caniko/nix-pklx.git#9d8c5dac62f4402cdfee015d3999f6caae6c1818"
+source = "git+https://github.com/caniko/nix-pklx.git#19179a0a6446c544b8333ce21b16f019acfb4f0e"
 dependencies = [
  "clap",
  "indexmap",
