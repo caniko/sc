@@ -12,12 +12,14 @@
       inputs.rust-overlay.follows = "rust-overlay";
     };
 
-    rs-harbor = {
-      url = "git+https://github.com/caniko/rs-harbor.git?ref=trunk&rev=05cc4f162b55fa904b687db1821e2463fa813e50";
+    harbor-rs = {
+      url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=05cc4f162b55fa904b687db1821e2463fa813e50";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.crane.follows = "crane";
       inputs.rust-overlay.follows = "rust-overlay";
     };
+
+    rs-harbor.follows = "harbor-rs";
 
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -39,7 +41,7 @@
     self,
     nixpkgs,
     plinth,
-    rs-harbor,
+    harbor-rs,
     rust-overlay,
     treefmt-nix,
     git-hooks,
@@ -68,7 +70,7 @@
 
     mkPackages = system: let
       pkgs = rawPkgsFor system;
-      harbor = rs-harbor.lib;
+      harbor = harbor-rs.lib;
       toolchain = harbor.mkToolchain {inherit pkgs;};
       craneLib = toolchain.craneLib;
       nativeBuildInputs = harbor.mkRustNativeBuildInputs {
@@ -78,7 +80,7 @@
       buildCache = harbor.mkBuildCachePolicy {
         inherit pkgs;
         buildPackageSet = pkgs.buildPackages;
-        sccachePackage = rs-harbor.packages.${system}.sccache;
+        sccachePackage = harbor-rs.packages.${system}.sccache;
         cacheRoot = "/tmp/sccache";
         namespaceScope = "canix-rust";
         namespaceGeneration = 5;
@@ -157,7 +159,7 @@
 
     mkChecks = system: let
       pkgs = rawPkgsFor system;
-      harbor = rs-harbor.lib;
+      harbor = harbor-rs.lib;
       toolchain = harbor.mkToolchain {inherit pkgs;};
       craneLib = toolchain.craneLib;
       packages = mkPackages system;
@@ -168,7 +170,7 @@
       buildCache = harbor.mkBuildCachePolicy {
         inherit pkgs;
         buildPackageSet = pkgs.buildPackages;
-        sccachePackage = rs-harbor.packages.${system}.sccache;
+        sccachePackage = harbor-rs.packages.${system}.sccache;
         cacheRoot = "/tmp/sccache";
         namespaceScope = "canix-rust";
         namespaceGeneration = 5;
@@ -273,7 +275,7 @@
 
     devShells = forSystems (system: let
       pkgs = rawPkgsFor system;
-      harbor = rs-harbor.lib;
+      harbor = harbor-rs.lib;
       toolchain = harbor.mkToolchain {inherit pkgs;};
       treefmtEval = treefmt-nix.lib.evalModule pkgs (import ./nix/treefmt.nix);
       pre-commit-check = git-hooks.lib.${system}.run {
