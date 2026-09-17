@@ -19,7 +19,6 @@
       inputs.rust-overlay.follows = "rust-overlay";
     };
 
-    rs-harbor.follows = "harbor-rs";
 
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
