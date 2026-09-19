@@ -6,7 +6,7 @@
     crane.url = "github:ipetkov/crane";
     nix-pklx.url = "git+https://github.com/caniko/nix-pklx.git";
     plinth = {
-      url = "git+https://codeberg.org/caniko/plinth";
+      url = "git+https://github.com/caniko/plinth";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.crane.follows = "crane";
       inputs.rust-overlay.follows = "rust-overlay";
