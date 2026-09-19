@@ -18,7 +18,7 @@ edition = "2021"
 [workspace.dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-pklx = { git = "https://codeberg.org/caniko/nix-pklx.git" }
+pklx = { git = "https://github.com/caniko/nix-pklx.git" }
 sc-core = { path = "crates/sc-core" }
 sc-detect = { path = "crates/sc-detect" }
 sc-hwmon = { path = "crates/sc-hwmon" }

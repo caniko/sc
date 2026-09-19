@@ -26,7 +26,7 @@ href = "/sc/docs/"
 
 [[nav]]
 label = "Source"
-href = "https://codeberg.org/caniko/sc"
+href = "https://github.com/caniko/sc"
 
 [[pages]]
 slug = "index"
@@ -46,7 +46,7 @@ primary = true
 
 [[pages.sections.ctas]]
 label = "View source"
-href = "https://codeberg.org/caniko/sc"
+href = "https://github.com/caniko/sc"
 
 [[pages.sections]]
 type = "feature_grid"
