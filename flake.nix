@@ -19,7 +19,6 @@
       inputs.rust-overlay.follows = "rust-overlay";
     };
 
-
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -263,11 +262,10 @@
       # Fail if flake inputs ever point at the retired Codeberg/Codefloe
       # mirrors again (fleet migrated to github.com/caniko/*).
       # sourceUrl package metadata is excluded: informational only, not fetched.
-      host-pinning =
-        let
-          # Split across literals so this file never matches its own pattern.
-          staleHosts = "cod" + "eberg|cod" + "efloe";
-        in
+      host-pinning = let
+        # Split across literals so this file never matches its own pattern.
+        staleHosts = "cod" + "eberg|cod" + "efloe";
+      in
         pkgs.runCommand "sc-host-pinning" {} ''
           if ${pkgs.lib.getExe pkgs.ripgrep} -v "sourceUrl" ${./flake.nix} ${./flake.lock} \
             | ${pkgs.lib.getExe pkgs.ripgrep} -q "${staleHosts}"; then
