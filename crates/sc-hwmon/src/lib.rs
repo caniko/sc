@@ -1,5 +1,6 @@
 pub mod fan;
 pub mod sensor;
+pub mod telemetry;
 
 use anyhow::{Context, Result};
 use std::fs;
