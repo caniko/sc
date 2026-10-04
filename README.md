@@ -74,3 +74,9 @@ ASUS firmware fan curves over D-Bus. Read-only `status`, `verify`, and bounded
 observed fan RPM, including firmware fans without writable PWM controls. The independent
 `services.smartcool.asusd` NixOS option configures those curves without enabling
 SmartCool's live hwmon daemon.
+
+The shared [firmware-table contract](docs/src/reference/firmware-tables.md)
+provides offline full-table validation and transaction-state tests for future
+backends. It does not expose Intel GPU control. Intel i915/Xe monitoring skips
+input reads when runtime PM is inactive or unknown and preserves zero RPM as a
+reading without interpreting which physical fan it represents.

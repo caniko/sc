@@ -16,3 +16,4 @@
 # Reference
 
 - [Configuration](./reference/configuration.md)
+- [Firmware Table Contract](./reference/firmware-tables.md)
