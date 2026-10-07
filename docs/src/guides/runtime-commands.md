@@ -44,10 +44,11 @@ The query commands connect to `/run/smartcool/sc.sock`. If the daemon is not run
 
 `sc asusd` talks directly to the running `asusd` service over the system D-Bus. It discovers platform profiles and CPU, GPU, or MID fan support at runtime; it does not use model allowlists or invoke `asusctl`.
 
-Show the supported profiles and their stored firmware curves:
+Show supported profiles, stored curves, kernel-exposed curves, and observed RPM/temperatures:
 
 ```sh
 sc asusd status
+sc asusd status --json
 ```
 
 Preview a typed Pkl configuration without changing firmware state:
@@ -62,7 +63,25 @@ Apply it explicitly:
 sc asusd apply --config /path/to/asusd.pkl --apply
 ```
 
-Before writing, SmartCool verifies every requested profile and fan and snapshots every curve it will touch. Each write is read back exactly. A write or verification failure restores attempted curves in reverse order. Raw PWM values remain in the firmware's `0..255` scale.
+Before writing, SmartCool verifies every requested profile and fan and snapshots every curve it will touch. Each write is read back exactly from asusd's stored configuration. A write or verification failure restores attempted curves in reverse order. Raw PWM values remain in the firmware's `0..255` scale, including zero-PWM fan-stop regions.
+
+Verify all declared profiles against stored configuration and the **active** profile against kernel-exposed curve points and enable state:
+
+```sh
+sc asusd verify --config /etc/smartcool/asusd.pkl --json
+```
+
+Verification does not switch profiles. Unsupported, mismatched, ambiguous, or unreadable active curves fail verification. Inactive profiles are checked only in asusd storage. Kernel curve attributes reflect driver state, not an independent EC read-back; matching points do not prove that the physical fans stopped.
+
+Measure a settled 15-minute fan-stop window:
+
+```sh
+sc asusd monitor --duration-seconds 900 --interval-ms 5000 --expect-stopped --json
+```
+
+Monitoring is read-only and needs no SmartCool daemon or writable PWM controls. It discovers hwmon chips and labels anew for each sample, including ASUS RPM-only fans. Missing/unreadable RPM is unknown, never zero. It does not poll GPU inputs unless runtime PM reports the device active. A profile change invalidates subsequent samples; rerun after the profile settles.
+
+JSON monitoring emits one `type: "sample"` object per sample, followed by a `type: "summary"` object with sample counts and maximum RPM per expected fan. `--expect-stopped` exits unsuccessfully unless **every** sample has a readable zero RPM for every ASUS fan discovered through asusd. Duration is bounded to 1–86400 seconds and intervals to 250–60000 milliseconds. This proves sampled fan stop, not continuous silence between samples or under untested workloads.
 
 Reset one profile to its firmware defaults, first as a preview and then explicitly:
 

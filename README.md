@@ -69,6 +69,8 @@ transactions restore each fan's original PWM and control mode on exit,
 including interrupted or failed runs.
 
 `sc asusd` separately discovers, previews, transactionally applies, and resets
-ASUS firmware fan curves over D-Bus. The independent
+ASUS firmware fan curves over D-Bus. Read-only `status`, `verify`, and bounded
+`monitor --expect-stopped` commands distinguish stored/driver curve state from
+observed fan RPM, including firmware fans without writable PWM controls. The independent
 `services.smartcool.asusd` NixOS option configures those curves without enabling
 SmartCool's live hwmon daemon.

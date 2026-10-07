@@ -5,10 +5,37 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use zbus::blocking::Connection;
 
+mod observe;
+mod verify;
+
 #[derive(Subcommand)]
 pub enum Command {
     /// Show supported platform profiles and firmware fan curves
-    Status,
+    Status {
+        /// Emit the stored curves and read-only live observations as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare declarations with stored curves and the active kernel curve
+    Verify {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Sample firmware fan RPM and temperatures without taking fan control
+    Monitor {
+        #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..=86400))]
+        duration_seconds: u64,
+        #[arg(long, default_value_t = 5000, value_parser = clap::value_parser!(u64).range(250..=60000))]
+        interval_ms: u64,
+        /// Fail if any sample has a spinning, missing, or unreadable ASUS fan
+        #[arg(long)]
+        expect_stopped: bool,
+        /// Emit JSON lines, ending with a summary
+        #[arg(long)]
+        json: bool,
+    },
     /// Preview or transactionally apply a Pkl fan-curve configuration
     Apply {
         /// Path to the asusd Pkl configuration
@@ -79,14 +106,27 @@ pub fn run(command: Command) -> Result<()> {
     let fans = FanCurvesBusProxy::new(&connection).context("connect to asusd FanCurves")?;
 
     match command {
-        Command::Status => status(&platform, &fans),
+        Command::Status { json } => observe::status(&platform, &fans, json),
+        Command::Verify { config, json } => observe::verify(&platform, &fans, &config, json),
+        Command::Monitor {
+            duration_seconds,
+            interval_ms,
+            expect_stopped,
+            json,
+        } => observe::monitor(
+            &platform,
+            &fans,
+            duration_seconds,
+            interval_ms,
+            expect_stopped,
+            json,
+        ),
         Command::Apply { config, apply } => apply_config(&platform, &fans, &config, apply),
         Command::Reset { profile, apply } => reset(&platform, &fans, &profile, apply),
     }
 }
 
-fn status(platform: &PlatformBusProxy<'_>, fans: &FanCurvesBusProxy<'_>) -> Result<()> {
-    let runtime = discover(platform, fans)?;
+fn print_stored_curves(runtime: &RuntimeState) {
     println!("Active platform profile: {}", runtime.active.name());
     println!("Supported profiles and fan curves:");
     for profile in &runtime.profiles {
@@ -95,7 +135,6 @@ fn status(platform: &PlatformBusProxy<'_>, fans: &FanCurvesBusProxy<'_>) -> Resu
             print_curve("    ", curve);
         }
     }
-    Ok(())
 }
 
 fn apply_config(
@@ -199,7 +238,7 @@ fn apply_config(
         },
     )?;
 
-    println!("Applied and verified {} fan curve(s).", changes.len());
+    println!("Applied {} fan curve(s); asusd stored configuration read-back verified. Use `sc asusd verify` for active kernel state and `sc asusd monitor` for RPM.", changes.len());
     Ok(())
 }
 

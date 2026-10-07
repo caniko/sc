@@ -236,6 +236,34 @@ mod tests {
     }
 
     #[test]
+    fn preserves_fan_stop_plateau_through_pkl_and_wire_conversion() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fan-stop.pkl");
+        std::fs::write(
+            &path,
+            r#"
+profiles = new Listing {
+  new {
+    name = "quiet"
+    curves = new Listing {
+      new {
+        fan = "CPU"
+        temp = new Listing { 40; 50; 55; 60; 65; 75; 85; 90 }
+        pwm = new Listing { 0; 0; 0; 40; 70; 120; 200; 255 }
+      }
+    }
+  }
+}
+"#,
+        )
+        .unwrap();
+        let wire = load(&path).unwrap().profiles[0].curves[0].wire().unwrap();
+        assert_eq!(wire.1, [0, 0, 0, 40, 70, 120, 200, 255]);
+        assert_eq!(wire.2[2], 55);
+        assert!(wire.3);
+    }
+
+    #[test]
     fn rejects_empty_and_duplicate_profiles() {
         assert!(validate(&Config { profiles: vec![] }).is_err());
         let mut config = test_config();

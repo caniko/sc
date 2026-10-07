@@ -1,5 +1,6 @@
 /target
 /result
+/.nix-results/
 docs/book/
 website/public/
 .plinth-project/
