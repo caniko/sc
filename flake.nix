@@ -252,6 +252,7 @@
       cargo-fmt = craneLib.cargoFmt {src = ./.;};
       formatting = treefmtEval.config.build.check self;
       module-daemon = moduleChecks.module-daemon;
+      module-nvidia = moduleChecks.module-nvidia;
       module-asusd = moduleChecks.module-asusd;
       module-asusd-assertions = moduleChecks.module-asusd-assertions;
       cli-runnable = pkgs.runCommand "smartcool-cli-runnable" {} ''

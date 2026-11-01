@@ -134,6 +134,17 @@ in {
       description = "SmartCool configuration serialized to Pkl.";
     };
 
+    nvidia = lib.mkOption {
+      type = lib.types.listOf lib.types.attrs;
+      default = [];
+      description = ''
+        NVIDIA GPUs whose fans are driven through NVML. Each entry has `device`
+        (PCI bus id or index), optional `hysteresis`, and `fans`, a list of
+        `{ index; disabled ? false; curve = [{ temp; percent; }]; }`. The driver
+        library comes from `hardware.nvidia.package`.
+      '';
+    };
+
     asusd = {
       enable = lib.mkEnableOption "declarative asusd firmware fan curves";
 
@@ -169,13 +180,18 @@ in {
         }
       ];
 
-      environment.etc."smartcool/config.pkl".text = pklModule cfg.settings + "\n";
+      environment.etc."smartcool/config.pkl".text = pklModule (cfg.settings // lib.optionalAttrs (cfg.nvidia != []) {inherit (cfg) nvidia;}) + "\n";
 
       systemd.services = {
         smartcool = {
           description = "SmartCool fan control daemon";
           wantedBy = ["multi-user.target"];
-          after = ["local-fs.target"];
+          after = ["local-fs.target"] ++ lib.optional (cfg.nvidia != []) "nvidia-persistenced.service";
+          wants = lib.optional (cfg.nvidia != []) "nvidia-persistenced.service";
+          # NVML dlopens libnvidia-ml.so.1; take it from the system driver package.
+          environment = lib.mkIf (cfg.nvidia != []) {
+            LD_LIBRARY_PATH = "${config.hardware.nvidia.package}/lib";
+          };
           conflicts = ["thinkfan.service"];
           serviceConfig = {
             Type = "notify";
