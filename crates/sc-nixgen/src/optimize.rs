@@ -336,6 +336,7 @@ mod tests {
                     CurvePoint { temp: 85, pwm: 200 },
                 ],
             }],
+            nvidia: vec![],
             tuning: Default::default(),
         };
 

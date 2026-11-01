@@ -427,6 +427,7 @@ pub fn prepare_from_detect(result: &DetectionResult, topo: &Topology) -> Result<
         },
         sensors: sensor_configs,
         fans: fan_configs,
+        nvidia: vec![],
         tuning: Default::default(),
     };
 

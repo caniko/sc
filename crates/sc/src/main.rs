@@ -2,6 +2,7 @@ mod asusd;
 mod controller;
 mod display;
 mod ipc_server;
+mod nvidia;
 mod thermal;
 
 use anyhow::Result;
@@ -40,6 +41,11 @@ enum Command {
         #[command(subcommand)]
         command: asusd::Command,
     },
+    /// Inspect or identify NVIDIA GPU fans through NVML
+    Nvidia {
+        #[command(subcommand)]
+        command: nvidia::Command,
+    },
 }
 
 fn main() -> Result<()> {
@@ -67,12 +73,14 @@ fn main() -> Result<()> {
         Command::Config { validate } => {
             let cfg = sc_core::config::load(&validate)?;
             println!(
-                "Configuration valid: {} sensors, {} fans",
+                "Configuration valid: {} sensors, {} fans, {} nvidia devices",
                 cfg.sensors.len(),
-                cfg.fans.len()
+                cfg.fans.len(),
+                cfg.nvidia.len()
             );
             Ok(())
         }
         Command::Asusd { command } => asusd::run(command),
+        Command::Nvidia { command } => nvidia::run(command),
     }
 }

@@ -7,8 +7,12 @@ use std::path::Path;
 pub struct Config {
     pub poll_interval_ms: u64,
     pub derivative: DerivativeConfig,
+    #[serde(default)]
     pub sensors: Vec<SensorConfig>,
+    #[serde(default)]
     pub fans: Vec<FanConfig>,
+    #[serde(default)]
+    pub nvidia: Vec<crate::nvidia::NvidiaGpu>,
     #[serde(default)]
     pub tuning: TuningConfig,
 }
@@ -215,11 +219,15 @@ where
 }
 
 fn validate(config: &Config) -> Result<()> {
-    anyhow::ensure!(
-        !config.sensors.is_empty(),
-        "at least one sensor is required"
-    );
-    anyhow::ensure!(!config.fans.is_empty(), "at least one fan is required");
+    crate::nvidia::validate(&config.nvidia)?;
+    // An nvidia-only host (e.g. one GPU) needs no hwmon sensors or fans.
+    if config.nvidia.is_empty() || !config.fans.is_empty() {
+        anyhow::ensure!(
+            !config.sensors.is_empty(),
+            "at least one sensor is required"
+        );
+        anyhow::ensure!(!config.fans.is_empty(), "at least one fan is required");
+    }
     anyhow::ensure!(config.poll_interval_ms > 0, "poll_interval_ms must be > 0");
     anyhow::ensure!(
         config.derivative.window_size >= 2,
@@ -397,6 +405,7 @@ mod tests {
                 hwmon_instance: None,
             }],
             fans: vec![test_fan()],
+            nvidia: vec![],
             tuning: Default::default(),
         }
     }
@@ -448,42 +457,52 @@ mod tests {
     fn validation_rejects_unsafe_tuning_values() {
         let mut config = test_config();
         config.tuning.ccf_buffer_size = 0;
-        assert!(validate(&config)
-            .unwrap_err()
-            .to_string()
-            .contains("ccf_buffer_size"));
+        assert!(
+            validate(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("ccf_buffer_size")
+        );
 
         let mut config = test_config();
         config.tuning.ccf_buffer_size = 20;
         config.tuning.ccf_max_lag = 11;
-        assert!(validate(&config)
-            .unwrap_err()
-            .to_string()
-            .contains("ccf_max_lag + 10"));
+        assert!(
+            validate(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("ccf_max_lag + 10")
+        );
 
         let mut config = test_config();
         config.tuning.response_window = 0;
-        assert!(validate(&config)
-            .unwrap_err()
-            .to_string()
-            .contains("response_window"));
+        assert!(
+            validate(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("response_window")
+        );
     }
 
     #[test]
     fn validation_rejects_non_finite_derivative_values() {
         let mut config = test_config();
         config.derivative.boost_threshold = f64::NAN;
-        assert!(validate(&config)
-            .unwrap_err()
-            .to_string()
-            .contains("boost_threshold"));
+        assert!(
+            validate(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("boost_threshold")
+        );
 
         let mut config = test_config();
         config.derivative.decay_rate = f64::INFINITY;
-        assert!(validate(&config)
-            .unwrap_err()
-            .to_string()
-            .contains("decay_rate"));
+        assert!(
+            validate(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("decay_rate")
+        );
     }
 
     #[test]

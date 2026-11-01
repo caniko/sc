@@ -51,6 +51,18 @@ pub fn run_daemon(config_path: &Path) -> Result<()> {
         sensors.push((sensor, tracker));
     }
 
+    // NVML fans: validated against the hardware before any are touched. The
+    // controllers restore driver control on drop, so declare them after `nvml`.
+    let nvml = (!config.nvidia.is_empty())
+        .then(|| nvml_wrapper::Nvml::init().context("failed to initialize NVML"))
+        .transpose()?;
+    let mut gpus = Vec::new();
+    if let Some(nvml) = &nvml {
+        for gpu in &config.nvidia {
+            gpus.push(sc_hwmon::nvidia::GpuController::new(nvml, gpu.clone())?);
+        }
+    }
+
     // Resolve every fan before taking control of any of them.
     let mut fans = Vec::new();
     for fc in &config.fans {
@@ -130,6 +142,9 @@ pub fn run_daemon(config_path: &Path) -> Result<()> {
     while !shutdown.load(Ordering::Relaxed) {
         let tick_start = Instant::now();
 
+        for gpu in &mut gpus {
+            gpu.tick();
+        }
         control_tick(
             &config,
             &mut sensors,
@@ -170,6 +185,7 @@ pub fn run_daemon(config_path: &Path) -> Result<()> {
         .restore()
         .context("failed to restore fan control modes")?;
     drop(fan_control);
+    drop(gpus);
 
     let _ = std::fs::remove_file(ipc::SOCKET_PATH);
 
@@ -401,9 +417,9 @@ fn linked_sensor_maxima(
 }
 
 fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::EnvFilter;
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 

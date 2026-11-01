@@ -1,4 +1,6 @@
 pub mod fan;
+#[cfg(feature = "nvidia")]
+pub mod nvidia;
 pub mod sensor;
 pub mod telemetry;
 
