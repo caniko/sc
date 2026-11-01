@@ -41,8 +41,27 @@ class FanConfig {
   curve: Listing<CurvePoint>
 }
 
+class NvidiaCurvePoint {
+  temp: UInt
+  percent: UInt(isBetween(0, 100))
+}
+
+class NvidiaFan {
+  index: UInt
+  disabled: Boolean = false
+  curve: Listing<NvidiaCurvePoint> = new {}
+}
+
+class NvidiaGpu {
+  /// PCI bus id ("0000:01:00.0") or NVML device index ("0").
+  device: String
+  hysteresis: UInt = 0
+  fans: Listing<NvidiaFan>
+}
+
 poll_interval_ms: UInt
 derivative: DerivativeConfig
-sensors: Listing<SensorConfig>
-fans: Listing<FanConfig>
+sensors: Listing<SensorConfig> = new {}
+fans: Listing<FanConfig> = new {}
+nvidia: Listing<NvidiaGpu> = new {}
 tuning: TuningConfig = new {}

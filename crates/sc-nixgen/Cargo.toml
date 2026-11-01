@@ -15,7 +15,8 @@ clap.workspace = true
 pklx.workspace = true
 sc-core.workspace = true
 sc-detect.workspace = true
-sc-hwmon.workspace = true
+nvml-wrapper = "0.13"
+sc-hwmon = { workspace = true, features = ["nvidia"] }
 serde.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true

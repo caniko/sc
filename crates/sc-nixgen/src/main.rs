@@ -2,6 +2,7 @@ mod benchmark;
 mod detect;
 mod emit;
 mod interrupt;
+mod nvidia_bench;
 mod optimize;
 mod pkl_format;
 mod stress;
@@ -58,6 +59,30 @@ enum Command {
 
         /// Actually write PWM values and run stress testing. Without this
         /// flag the command only prints the planned transaction.
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Sweep NVIDIA (NVML) fan speed against GPU temperature under your own GPU
+    /// load and suggest a curve for the healthy fans.
+    BenchmarkNvidia {
+        /// PCI bus id (0000:01:00.0) or NVML device index
+        #[arg(long)]
+        device: String,
+
+        /// Faulty fan index, held at the minimum and assumed to contribute nothing (repeatable)
+        #[arg(long = "disabled-fan")]
+        disabled_fans: Vec<u32>,
+
+        /// Temperature the suggested curve should hold under, in C
+        #[arg(long, default_value = "75")]
+        target_c: u32,
+
+        /// Seconds to hold each step before sampling
+        #[arg(long, default_value = "60")]
+        hold_secs: u64,
+
+        /// Actually drive the fans; state is restored on exit. Without this
+        /// flag the command only prints the plan.
         #[arg(long)]
         apply: bool,
     },
@@ -179,6 +204,24 @@ fn main() -> Result<()> {
                 eprintln!("NixOS config written to {}", nix_path.display());
             }
 
+            Ok(())
+        }
+        Command::BenchmarkNvidia {
+            device,
+            disabled_fans,
+            target_c,
+            hold_secs,
+            apply,
+        } => {
+            anyhow::ensure!((25..=140).contains(&target_c), "target-c must be 25..=140");
+            let text = nvidia_bench::run(nvidia_bench::Args {
+                device,
+                disabled: disabled_fans,
+                target_c,
+                hold_secs,
+                apply,
+            })?;
+            print!("{text}");
             Ok(())
         }
         Command::Identify {
