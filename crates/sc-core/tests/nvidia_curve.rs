@@ -58,6 +58,12 @@ fn startup_checks() {
 }
 
 #[test]
+fn rejects_all_fans_disabled() {
+    assert!(validate(&[gpu(2, &[0, 1])]).is_err());
+    assert!(validate(&[gpu(2, &[1])]).is_ok());
+}
+
+#[test]
 fn rejects_non_monotonic_curves() {
     let mut g = gpu(1, &[]);
     assert!(validate(&[g.clone()]).is_ok());

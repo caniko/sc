@@ -18,10 +18,14 @@ pub struct Args {
 const STEPS: [u32; 8] = [30, 40, 50, 60, 70, 80, 90, 100];
 
 pub fn run(a: Args) -> Result<String> {
+    anyhow::ensure!(a.hold_secs > 0, "hold-secs must be greater than zero");
     let nvml = Nvml::init().context("failed to initialize NVML")?;
     let dev = open(&nvml, &a.device)?;
     let num = dev.num_fans()?;
     let (min, max) = dev.min_max_fan_speed()?;
+    if let Some(bad) = a.disabled.iter().find(|i| **i >= num) {
+        anyhow::bail!("--disabled-fan {bad} does not exist (num_fans = {num})");
+    }
     let healthy: Vec<u32> = (0..num).filter(|i| !a.disabled.contains(i)).collect();
     anyhow::ensure!(
         !healthy.is_empty(),
@@ -59,10 +63,11 @@ pub fn run(a: Args) -> Result<String> {
         let mut last = Vec::new();
         for _ in 0..a.hold_secs {
             interrupt.check()?;
-            gpu.tick();
+            gpu.try_tick()?; // abort: drop restores automatic control
             last.push(dev.temperature(TemperatureSensor::Gpu)? as f64);
             interrupt.sleep(Duration::from_secs(1))?;
         }
+        anyhow::ensure!(!last.is_empty(), "no temperature samples at {pct}%");
         let tail = &last[last.len().saturating_sub(5)..];
         let temp = tail.iter().sum::<f64>() / tail.len().max(1) as f64;
         eprintln!("  {pct:>3}% -> {temp:.1}C");
