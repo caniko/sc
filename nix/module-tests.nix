@@ -230,7 +230,7 @@ in {
       test ${nixpkgs.lib.escapeShellArg nvidiaCfg.systemd.services.smartcool.environment.LD_LIBRARY_PATH} = ${nixpkgs.lib.escapeShellArg "${nvidiaCfg.hardware.nvidia.package}/lib"}
       test "${toString (builtins.elem "nvidia-persistenced.service" nvidiaCfg.systemd.services.smartcool.after)}" = 1
       test "${toString (builtins.elem "nvidia-persistenced.service" nvidiaCfg.systemd.services.smartcool.wants)}" = 1
-      test "${toString (builtins.elem "nvidia-persistenced.service" (nvidiaCfg.systemd.services.smartcool.requires or []))}" = 0
+      test -z "${toString (builtins.elem "nvidia-persistenced.service" (nvidiaCfg.systemd.services.smartcool.requires or []))}"
       ${package}/bin/sc config --validate ${nvidiaCfg.environment.etc."smartcool/config.pkl".source} | grep -F '1 nvidia devices'
       touch $out
     '';
