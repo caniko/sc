@@ -8,8 +8,9 @@ Top-level fields:
 
 - `poll_interval_ms`: daemon poll interval in milliseconds. Must be greater than zero.
 - `derivative`: derivative boost configuration.
-- `sensors`: temperature sensor definitions. At least one is required.
-- `fans`: PWM fan definitions. At least one is required.
+- `sensors`: temperature sensor definitions. At least one is required unless only `nvidia` is configured.
+- `fans`: PWM fan definitions. At least one is required unless only `nvidia` is configured.
+- `nvidia`: optional list of NVIDIA GPUs driven through NVML (see below).
 - `tuning`: optional advanced tuning settings. Defaults are applied when omitted.
 
 `derivative` fields:
@@ -58,3 +59,30 @@ Tuning defaults:
 - `regression_min_samples = 60`
 
 All tuning sizes must be nonzero, `response_window` must be at least `5`, and `ccf_buffer_size` must be at least `ccf_max_lag + 10`.
+
+## NVIDIA fans
+
+Each `nvidia` entry controls the fans of one GPU through NVML (`libnvidia-ml.so.1`, provided by the NixOS module from `hardware.nvidia.package`):
+
+- `device`: PCI bus id such as `"0000:01:00.0"`, or an NVML index such as `"0"`.
+- `hysteresis`: optional degrees C (default `0`); a falling temperature must drop more than this below the held value before the curve follows it down.
+- `fans`: list of `{ index, disabled = false, curve }`. `curve` is a list of `{ temp, percent }` points.
+
+Validation requires strictly ascending temperatures, non-decreasing percents within `0..=100`, at least two points for every enabled fan, and unique fan indexes. At startup every `index` must be below the driver's `num_fans`.
+
+Each tick the GPU temperature is read, each enabled fan gets its interpolated percent clamped to the driver's min/max range, and disabled fans get the minimum. If the minimum is above `0` the firmware forbids a full stop; a warning is logged once. If the temperature cannot be read, every enabled fan is commanded to the maximum. On shutdown, error, or panic the driver's automatic control is restored.
+
+When `num_fans` is `1` the fans share one controller, so a `disabled` fan is refused at startup; unplug the fan header instead.
+
+```nix
+services.smartcool.nvidia = [
+  {
+    device = "0000:01:00.0";
+    hysteresis = 2;
+    fans = [
+      { index = 0; curve = [ { temp = 40; percent = 30; } { temp = 80; percent = 100; } ]; }
+      { index = 1; disabled = true; }
+    ];
+  }
+];
+```

@@ -7,8 +7,12 @@ use std::path::Path;
 pub struct Config {
     pub poll_interval_ms: u64,
     pub derivative: DerivativeConfig,
+    #[serde(default)]
     pub sensors: Vec<SensorConfig>,
+    #[serde(default)]
     pub fans: Vec<FanConfig>,
+    #[serde(default)]
+    pub nvidia: Vec<crate::nvidia::NvidiaGpu>,
     #[serde(default)]
     pub tuning: TuningConfig,
 }
@@ -215,11 +219,15 @@ where
 }
 
 fn validate(config: &Config) -> Result<()> {
-    anyhow::ensure!(
-        !config.sensors.is_empty(),
-        "at least one sensor is required"
-    );
-    anyhow::ensure!(!config.fans.is_empty(), "at least one fan is required");
+    crate::nvidia::validate(&config.nvidia)?;
+    // An nvidia-only host (e.g. one GPU) needs no hwmon sensors or fans.
+    if config.nvidia.is_empty() || !config.fans.is_empty() {
+        anyhow::ensure!(
+            !config.sensors.is_empty(),
+            "at least one sensor is required"
+        );
+        anyhow::ensure!(!config.fans.is_empty(), "at least one fan is required");
+    }
     anyhow::ensure!(config.poll_interval_ms > 0, "poll_interval_ms must be > 0");
     anyhow::ensure!(
         config.derivative.window_size >= 2,
@@ -397,6 +405,7 @@ mod tests {
                 hwmon_instance: None,
             }],
             fans: vec![test_fan()],
+            nvidia: vec![],
             tuning: Default::default(),
         }
     }

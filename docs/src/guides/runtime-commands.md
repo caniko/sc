@@ -92,4 +92,24 @@ sc asusd reset --profile quiet --apply
 
 Reset also snapshots the profile and restores it if reset or read-back verification fails. The active platform profile is checked and preserved across both operations.
 
+## NVIDIA fans
+
+Show every GPU's name, driver, temperature, power, fan count, min/max range, and per-fan speed and control policy (read-only):
+
+```sh
+sc nvidia status
+```
+
+Find which physical fan is which: spin one fan to 100% with the others at the minimum, then restore automatic control (also on Ctrl-C):
+
+```sh
+sc nvidia identify --device 0000:01:00.0 --fan 1 --seconds 15
+```
+
+Suggest a curve for the healthy fans. Start your own GPU load first (NVIDIA load is not generated); without `--apply` this only prints the plan, and fan state is restored on exit:
+
+```sh
+sc-nixgen benchmark-nvidia --device 0000:01:00.0 --disabled-fan 1 --target-c 75 --apply
+```
+
 These are persistent `asusd` firmware curves. They are separate from `sc daemon`, which continuously reads hwmon temperatures and writes live hwmon PWM values using SmartCool's derivative tracking and analytics.

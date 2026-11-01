@@ -6,7 +6,7 @@
 
 <!-- simit:badges:end -->
 
-SmartCool is a Linux fan control daemon for systems that expose temperature sensors and PWM fan controls through `/sys/class/hwmon`.
+SmartCool is a Linux fan control daemon for systems that expose temperature sensors and PWM fan controls through `/sys/class/hwmon`. NVIDIA GPU fans are driven per fan through NVML (`nvidia` config, `sc nvidia`), including holding a faulty fan at the firmware minimum.
 
 The repository contains the `sc` daemon and CLI, shared configuration and IPC types, hwmon access helpers, hardware detection, and `sc-nixgen` for generating NixOS configuration from detected hardware and optional tuning data.
 

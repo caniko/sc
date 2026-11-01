@@ -72,6 +72,7 @@ pub fn build_config(result: &DetectionResult) -> Config {
         },
         sensors,
         fans,
+        nvidia: vec![],
         tuning: Default::default(),
     }
 }

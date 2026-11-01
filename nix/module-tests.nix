@@ -66,6 +66,44 @@
     };
   };
 
+  nvidiaSystem = eval {
+    hardware.nvidia.package = pkgs.hello; # stand-in: only its store path is checked
+    services.smartcool.enable = true;
+    services.smartcool.settings = {
+      poll_interval_ms = 2000;
+      derivative = {
+        window_size = 10;
+        boost_threshold = 2.0;
+        decay_rate = 0.5;
+      };
+    };
+    services.smartcool.nvidia = [
+      {
+        device = "0000:01:00.0";
+        hysteresis = 2;
+        fans = [
+          {
+            index = 0;
+            curve = [
+              {
+                temp = 40;
+                percent = 30;
+              }
+              {
+                temp = 80;
+                percent = 100;
+              }
+            ];
+          }
+          {
+            index = 1;
+            disabled = true;
+          }
+        ];
+      }
+    ];
+  };
+
   conflictingSystem = eval {
     services.smartcool.enable = true;
     services.thinkfan.enable = true;
@@ -154,6 +192,7 @@
     systemConfig.config.assertions;
 
   basicCfg = basicSystem.config;
+  nvidiaCfg = nvidiaSystem.config;
   asusdCfg = asusdSystem.config;
 in {
   module-daemon =
@@ -177,6 +216,22 @@ in {
       pklx eval ${basicCfg.environment.etc."smartcool/config.pkl".source} > "$TMPDIR/config.nix"
       grep -F 'poll_interval_ms = 2000' "$TMPDIR/config.nix"
       ${package}/bin/sc config --validate ${basicCfg.environment.etc."smartcool/config.pkl".source}
+      touch $out
+    '';
+
+  module-nvidia =
+    pkgs.runCommand "smartcool-module-nvidia" {
+      nativeBuildInputs = [
+        pklx
+        pkgs.cacert
+      ];
+      SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+    } ''
+      test ${nixpkgs.lib.escapeShellArg nvidiaCfg.systemd.services.smartcool.environment.LD_LIBRARY_PATH} = ${nixpkgs.lib.escapeShellArg "${nvidiaCfg.hardware.nvidia.package}/lib"}
+      test "${toString (builtins.elem "nvidia-persistenced.service" nvidiaCfg.systemd.services.smartcool.after)}" = 1
+      test "${toString (builtins.elem "nvidia-persistenced.service" nvidiaCfg.systemd.services.smartcool.wants)}" = 1
+      test -z "${toString (builtins.elem "nvidia-persistenced.service" (nvidiaCfg.systemd.services.smartcool.requires or []))}"
+      ${package}/bin/sc config --validate ${nvidiaCfg.environment.etc."smartcool/config.pkl".source} | grep -F '1 nvidia devices'
       touch $out
     '';
 
