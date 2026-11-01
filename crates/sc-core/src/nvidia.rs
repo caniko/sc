@@ -44,6 +44,11 @@ pub fn validate(gpus: &[NvidiaGpu]) -> Result<()> {
             "nvidia device '{}' needs at least one fan",
             gpu.device
         );
+        ensure!(
+            gpu.fans.iter().any(|f| !f.disabled),
+            "nvidia device '{}' has every fan disabled; remove the entry instead",
+            gpu.device
+        );
         let mut indexes = HashSet::new();
         for fan in &gpu.fans {
             ensure!(

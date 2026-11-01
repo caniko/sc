@@ -5,6 +5,8 @@
   ...
 }: let
   cfg = config.services.smartcool;
+  # nvidia may arrive through the option or through raw settings.
+  useNvidia = cfg.nvidia != [] || (cfg.settings.nvidia or []) != [];
   asusdCfg = cfg.asusd;
 
   pklString = value: "\"${builtins.replaceStrings ["\\" "\"" "\n" "\r" "\t"] ["\\\\" "\\\"" "\\n" "\\r" "\\t"] value}\"";
@@ -186,10 +188,10 @@ in {
         smartcool = {
           description = "SmartCool fan control daemon";
           wantedBy = ["multi-user.target"];
-          after = ["local-fs.target"] ++ lib.optional (cfg.nvidia != []) "nvidia-persistenced.service";
-          wants = lib.optional (cfg.nvidia != []) "nvidia-persistenced.service";
+          after = ["local-fs.target"] ++ lib.optional useNvidia "nvidia-persistenced.service";
+          wants = lib.optional useNvidia "nvidia-persistenced.service";
           # NVML dlopens libnvidia-ml.so.1; take it from the system driver package.
-          environment = lib.mkIf (cfg.nvidia != []) {
+          environment = lib.mkIf useNvidia {
             LD_LIBRARY_PATH = "${config.hardware.nvidia.package}/lib";
           };
           conflicts = ["thinkfan.service"];
