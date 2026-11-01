@@ -417,9 +417,9 @@ fn linked_sensor_maxima(
 }
 
 fn init_tracing() {
-    use tracing_subscriber::EnvFilter;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::EnvFilter;
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 

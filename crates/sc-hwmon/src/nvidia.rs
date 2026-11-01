@@ -1,8 +1,8 @@
 //! NVML fan control. Takes manual control on the first write and hands every
 //! managed fan back to the driver on drop (shutdown, error and panic paths).
 use anyhow::{Context, Result};
-use nvml_wrapper::{Device, Nvml, enum_wrappers::device::TemperatureSensor};
-use sc_core::nvidia::{NvidiaGpu, check_hardware, plan};
+use nvml_wrapper::{enum_wrappers::device::TemperatureSensor, Device, Nvml};
+use sc_core::nvidia::{check_hardware, plan, NvidiaGpu};
 
 /// Resolve a PCI bus id ("0000:01:00.0") or a device index ("0").
 pub fn open<'a>(nvml: &'a Nvml, device: &str) -> Result<Device<'a>> {

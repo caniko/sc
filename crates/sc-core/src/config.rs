@@ -457,52 +457,42 @@ mod tests {
     fn validation_rejects_unsafe_tuning_values() {
         let mut config = test_config();
         config.tuning.ccf_buffer_size = 0;
-        assert!(
-            validate(&config)
-                .unwrap_err()
-                .to_string()
-                .contains("ccf_buffer_size")
-        );
+        assert!(validate(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("ccf_buffer_size"));
 
         let mut config = test_config();
         config.tuning.ccf_buffer_size = 20;
         config.tuning.ccf_max_lag = 11;
-        assert!(
-            validate(&config)
-                .unwrap_err()
-                .to_string()
-                .contains("ccf_max_lag + 10")
-        );
+        assert!(validate(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("ccf_max_lag + 10"));
 
         let mut config = test_config();
         config.tuning.response_window = 0;
-        assert!(
-            validate(&config)
-                .unwrap_err()
-                .to_string()
-                .contains("response_window")
-        );
+        assert!(validate(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("response_window"));
     }
 
     #[test]
     fn validation_rejects_non_finite_derivative_values() {
         let mut config = test_config();
         config.derivative.boost_threshold = f64::NAN;
-        assert!(
-            validate(&config)
-                .unwrap_err()
-                .to_string()
-                .contains("boost_threshold")
-        );
+        assert!(validate(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("boost_threshold"));
 
         let mut config = test_config();
         config.derivative.decay_rate = f64::INFINITY;
-        assert!(
-            validate(&config)
-                .unwrap_err()
-                .to_string()
-                .contains("decay_rate")
-        );
+        assert!(validate(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("decay_rate"));
     }
 
     #[test]

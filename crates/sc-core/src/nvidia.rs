@@ -1,6 +1,6 @@
 //! NVIDIA (NVML) fan policy: config types and the pure curve logic, kept free
 //! of NVML so it is testable without a GPU.
-use anyhow::{Result, ensure};
+use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 

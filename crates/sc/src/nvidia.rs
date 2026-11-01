@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use nvml_wrapper::{Nvml, enum_wrappers::device::TemperatureSensor};
+use nvml_wrapper::{enum_wrappers::device::TemperatureSensor, Nvml};
 use sc_core::nvidia::{NvidiaFan, NvidiaGpu, NvidiaPoint};
-use sc_hwmon::nvidia::{GpuController, open};
-use std::sync::Arc;
+use sc_hwmon::nvidia::{open, GpuController};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Subcommand)]

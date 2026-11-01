@@ -2,9 +2,9 @@
 //! temperature, and suggest a curve. Review-first: dry run unless `--apply`.
 use crate::interrupt::InterruptGuard;
 use anyhow::{Context, Result};
-use nvml_wrapper::{Nvml, enum_wrappers::device::TemperatureSensor};
+use nvml_wrapper::{enum_wrappers::device::TemperatureSensor, Nvml};
 use sc_core::nvidia::{NvidiaFan, NvidiaGpu, NvidiaPoint};
-use sc_hwmon::nvidia::{GpuController, open};
+use sc_hwmon::nvidia::{open, GpuController};
 use std::time::Duration;
 
 pub struct Args {
