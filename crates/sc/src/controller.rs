@@ -57,9 +57,18 @@ pub fn run_daemon(config_path: &Path) -> Result<()> {
         .then(|| nvml_wrapper::Nvml::init().context("failed to initialize NVML"))
         .transpose()?;
     let mut gpus = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
     if let Some(nvml) = &nvml {
         for gpu in &config.nvidia {
-            gpus.push(sc_hwmon::nvidia::GpuController::new(nvml, gpu.clone())?);
+            let ctl = sc_hwmon::nvidia::GpuController::new(nvml, gpu.clone())?;
+            let id = ctl.bus_id()?;
+            anyhow::ensure!(
+                !seen.contains(&id),
+                "nvidia device '{}' resolves to {id}, already configured",
+                gpu.device
+            );
+            seen.push(id);
+            gpus.push(ctl);
         }
     }
 

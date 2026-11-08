@@ -35,9 +35,21 @@ impl<'a> GpuController<'a> {
         })
     }
 
-    /// One control step. Per-fan write errors are logged, not fatal: a lost
-    /// device then reads as a failed temperature and drives the 100% fail-safe.
+    /// Normalised PCI bus id as reported by NVML, so an index and its bus id compare equal.
+    pub fn bus_id(&self) -> Result<String> {
+        Ok(self.dev.pci_info().context("read PCI info")?.bus_id)
+    }
+
+    /// Daemon step: write errors are logged, not fatal; a lost device then reads
+    /// as a failed temperature and drives the 100% fail-safe.
     pub fn tick(&mut self) {
+        if let Err(e) = self.try_tick() {
+            tracing::error!(device = %self.cfg.device, error = %e, "fan control step failed");
+        }
+    }
+
+    /// One control step that reports the first fan write failure (all fans are still attempted).
+    pub fn try_tick(&mut self) -> Result<()> {
         let temp = match self.dev.temperature(TemperatureSensor::Gpu) {
             Ok(t) => Some(t as f64),
             Err(e) => {
@@ -53,11 +65,14 @@ impl<'a> GpuController<'a> {
                 "firmware forbids a full stop; disabled fans are held at the minimum"
             );
         }
+        let mut first = None;
         for (index, pct) in plan(&self.cfg, &mut self.held, temp, self.range) {
             if let Err(e) = self.dev.set_fan_speed(index, pct) {
                 tracing::error!(device = %self.cfg.device, fan = index, pct, error = %e, "failed to set fan speed");
+                first.get_or_insert(anyhow::anyhow!("fan {index} set to {pct}%: {e}"));
             }
         }
+        first.map_or(Ok(()), Err)
     }
 
     pub fn restore(&mut self) {
