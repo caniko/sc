@@ -54,8 +54,13 @@ pub fn read_snapshot(base: &Path) -> Result<Snapshot> {
         let Some(chip) = text(&path.join("name")) else {
             continue;
         };
-        let blocked = if matches!(chip.as_str(), "amdgpu" | "nvidia" | "nouveau") {
+        let blocked = if matches!(
+            chip.as_str(),
+            "amdgpu" | "nvidia" | "nouveau" | "i915" | "xe"
+        ) {
             match text(&path.join("device/power/runtime_status")) {
+                // `unsupported` (runtime PM disabled) stays blocked: it can mask a
+                // device that was already suspended when PM was disabled.
                 Some(state) if state == "active" => None,
                 Some(state) => Some(format!("device runtime-{state}")),
                 None => Some("GPU runtime state unavailable".to_owned()),
@@ -218,6 +223,45 @@ mod tests {
             snapshot.temperatures[0].error.as_deref(),
             Some("device runtime-suspended")
         );
+    }
+
+    #[test]
+    fn intel_gpu_runtime_state_gates_inputs_without_reading_curve_getters() {
+        for name in ["i915", "xe"] {
+            let root = tempfile::tempdir().unwrap();
+            let chip = root.path().join("hwmon1");
+            fs::create_dir_all(chip.join("device/power")).unwrap();
+            fs::write(chip.join("name"), name).unwrap();
+            fs::write(chip.join("fan1_input"), "0").unwrap();
+            fs::write(chip.join("temp1_input"), "41000").unwrap();
+            // Intel curve getter contracts are unqualified; inventory does not
+            // opt them into the ASUS-specific read path.
+            fs::write(chip.join("pwm1_enable"), "1").unwrap();
+            fs::write(chip.join("pwm1_auto_point1_temp"), "invalid").unwrap();
+            let unknown = read_snapshot(root.path()).unwrap();
+            assert_eq!(unknown.fans[0].rpm, None);
+            assert_eq!(
+                unknown.fans[0].error.as_deref(),
+                Some("GPU runtime state unavailable")
+            );
+            for state in ["suspended", "suspending", "resuming", "unsupported"] {
+                fs::write(chip.join("device/power/runtime_status"), state).unwrap();
+                let snapshot = read_snapshot(root.path()).unwrap();
+                assert_eq!(snapshot.fans[0].rpm, None);
+                assert_eq!(snapshot.temperatures[0].temp_c, None);
+                assert_eq!(
+                    snapshot.fans[0].error.as_deref(),
+                    Some(format!("device runtime-{state}").as_str())
+                );
+            }
+            fs::write(chip.join("device/power/runtime_status"), "active").unwrap();
+            let active = read_snapshot(root.path()).unwrap();
+            assert_eq!(active.fans[0].rpm, Some(0));
+            assert_eq!(active.temperatures[0].temp_c, Some(41.0));
+            assert!(active.curves.is_empty());
+            fs::write(chip.join("fan1_input"), "invalid").unwrap();
+            assert!(read_snapshot(root.path()).unwrap().fans[0].error.is_some());
+        }
     }
 
     #[test]

@@ -33,7 +33,7 @@ fn stored_json(runtime: &RuntimeState) -> BTreeMap<&str, &Vec<asusd_config::Wire
 }
 
 fn print_live(snapshot: &Snapshot) {
-    println!("Observed RPM (zero means stopped; unavailable is not zero):");
+    println!("Observed RPM (unavailable is not zero; zero alone does not prove a stopped fan):");
     for fan in &snapshot.fans {
         println!(
             "  {}/{}: {}",
