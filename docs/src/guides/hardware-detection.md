@@ -62,11 +62,16 @@ Benchmark writes are guarded by the same transaction-safe restoration path and
 the generated Nix module is only produced after an applied benchmark has
 collected tuning data.
 
-Under CPU and then GPU stress, the benchmark runs every combination of sweep
-units at full speed or at their floor (30 PWM for coolers, 0 for case fans),
-twice: once in Gray-code order and once reversed. Each direct cooler is a
-unit, and so is each case-fan `group`; at most four units are allowed. The
-two passes cancel linear heat soak. For each load it records the cheapest
+Each direct cooler is a sweep unit, and so is each case-fan `group`. Under
+CPU and then GPU stress, each unit runs at full speed or at its floor (30 PWM
+for coolers, 0 for case fans). With up to four units the benchmark runs every
+combination twice, once in Gray-code order and once reversed, which cancels
+linear heat soak. With more units it uses backward elimination instead: from
+all fans at full speed it tries dropping one unit at a time, largest first,
+measures each candidate twice around an all-max reference, and keeps the drop
+when the reduced set still passes. That is 2 + 3k runs rather than 2·2^k,
+and it can miss a cheaper set that is not reachable by dropping one unit at a
+time. Either way it records the cheapest
 fan set (fewest physical fans at full speed) that keeps every target sensor
 within noise, or at least 1 °C, of the all-max temperature. It also checks
 CPU package power (RAPL, needs root) or each GPU's board power stays within 3%, so

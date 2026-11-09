@@ -617,9 +617,9 @@ fn read_temperatures(sensors: &[Sensor]) -> Result<Vec<f64>> {
 
 // ─── Benchmark ──────────────────────────────────────────────────────────────
 
-/// Sweep units per phase; a full factorial costs 2·2^k runs.
-// ponytail: full factorial only; add a fractional design if hosts need >4 units.
-const MAX_SWEEP_UNITS: usize = 4;
+/// Up to this many sweep units, run the exact full factorial (2·2^k runs);
+/// beyond it, backward elimination (2 + 3k runs).
+const FULL_FACTORIAL_UNITS: usize = 4;
 
 /// A fan set suffices for a load when every target sensor stays within this
 /// (or the measured noise, whichever is larger) of the all-max temperature...
@@ -764,18 +764,17 @@ pub fn run_benchmark(
         })
         .collect();
     anyhow::ensure!(!units.is_empty(), "no controllable fans to sweep");
-    anyhow::ensure!(
-        units.len() <= MAX_SWEEP_UNITS,
-        "{} sweep units exceed the factorial limit of {}; put case fans that \
-         should move together into a topology `group`",
-        units.len(),
-        MAX_SWEEP_UNITS
-    );
+    // Run masks are u32 bitsets.
+    anyhow::ensure!(units.len() < 32, "at most 31 sweep units are supported");
 
     let has_cpu_sensors = sensor_names.iter().any(|s| s.starts_with("cpu"));
     let has_gpu_sensors = sensor_names.iter().any(|s| s.starts_with("gpu"));
     let n_phases = has_cpu_sensors as u64 + has_gpu_sensors as u64;
-    let runs = 2u64 << units.len();
+    let runs = if units.len() <= FULL_FACTORIAL_UNITS {
+        2u64 << units.len()
+    } else {
+        2 + 3 * units.len() as u64
+    };
     let est = |settle: f64| {
         30 + n_phases * (STRESS_WARMUP_SECS + runs * (settle as u64 + STRESS_SAMPLE_SECS))
     };
@@ -937,8 +936,7 @@ where
         .map(|n| n.starts_with(load))
         .collect();
     let start = std::time::Instant::now();
-    let mut runs = Vec::new();
-    for mask in factorial_order(hw.units.len()) {
+    let mut measure = |mask: u32| -> Result<Run> {
         hw.interrupt.check()?;
         let pwms = set_units(fans, hw, mask)?;
         let at_max: Vec<&str> = hw
@@ -973,13 +971,34 @@ where
         line.extend(power_w.iter().flatten().map(|w| format!("{:.0} W", w)));
         eprintln!("{}", line.join(", "));
 
-        runs.push(Run {
+        Ok(Run {
             mask,
             pwms,
             t,
             temps,
             power_w,
-        });
+        })
+    };
+
+    let mut runs = Vec::new();
+    if hw.units.len() <= FULL_FACTORIAL_UNITS {
+        for mask in factorial_order(hw.units.len()) {
+            runs.push(measure(mask)?);
+        }
+    } else {
+        let costs: Vec<u32> = hw
+            .units
+            .iter()
+            .map(|&u| {
+                unit_fans(hw.classified, u)
+                    .iter()
+                    .map(|f| f.fan_count)
+                    .sum()
+            })
+            .collect();
+        backward_elimination(full, &costs, &mut runs, &mut measure, |runs, c| {
+            assess(load, runs, hw.sensor_names).accepts(c)
+        })?;
     }
 
     stress.stop().context("failed to stop stress workload")?;
@@ -1105,54 +1124,99 @@ impl CornerFit {
     }
 }
 
-/// Pick the cheapest fan set (fewest physical fans at full speed) that keeps
-/// every target sensor within noise of the all-max temperature and, when a
-/// power meter is available, does not cost measurable power.
-fn select_load_profile(
-    m: &PhaseMeasurement,
-    classified: &[ClassifiedFan],
-    sensor_names: &[String],
-) -> LoadProfile {
-    let corners = 1usize << m.units.len();
-    let full = corners - 1;
+/// Backward elimination for many sweep units: from all-max, try dropping
+/// one unit at a time (largest physical fan count first) and keep the drop
+/// when the reduced set still passes `accepts` against all-max. Each
+/// candidate is measured twice around an all-max reference, so drift stays
+/// separable and every comparison is made against all-max directly.
+// ponytail: greedy over nested sets, 2 + 3k runs; it can miss a cheaper set
+// that only works without the unit it kept first. The full factorial below
+// FULL_FACTORIAL_UNITS is exact.
+fn backward_elimination(
+    full: u32,
+    costs: &[u32],
+    runs: &mut Vec<Run>,
+    measure: &mut dyn FnMut(u32) -> Result<Run>,
+    accepts: impl Fn(&[Run], u32) -> bool,
+) -> Result<()> {
+    runs.push(measure(full)?);
+    runs.push(measure(full)?);
+    let mut order: Vec<usize> = (0..costs.len()).collect();
+    order.sort_by_key(|&bit| std::cmp::Reverse(costs[bit]));
+    let mut current = full;
+    for bit in order {
+        let candidate = current & !(1 << bit);
+        runs.push(measure(candidate)?);
+        runs.push(measure(full)?);
+        runs.push(measure(candidate)?);
+        if accepts(runs, candidate) {
+            current = candidate;
+        }
+    }
+    Ok(())
+}
+
+/// How each observed corner compares with all-max.
+struct Assessment {
+    /// Observed corners and, for each, its total excess temperature over
+    /// all-max, or `None` when it is not sufficient.
+    corners: Vec<(u32, Option<f64>)>,
+    /// False when power evidence is incomplete (a meter missed readings or
+    /// a device is unmetered beside metered ones): then only all-max is safe.
+    complete: bool,
+}
+
+impl Assessment {
+    fn accepts(&self, corner: u32) -> bool {
+        self.complete
+            && self
+                .corners
+                .iter()
+                .any(|&(c, excess)| c == corner && excess.is_some())
+    }
+}
+
+/// A corner suffices for a load when every target sensor stays within
+/// noise of the all-max temperature and, when power meters are available,
+/// every metered device keeps its power.
+fn assess(load: &str, runs: &[Run], sensor_names: &[String]) -> Assessment {
+    let full = runs.iter().map(|r| r.mask).fold(0, |a, m| a | m);
+    let mut observed: Vec<u32> = runs.iter().map(|r| r.mask).collect();
+    observed.sort_unstable();
+    observed.dedup();
+    let full_idx = observed.iter().position(|&c| c == full);
     let group = |value: &dyn Fn(&Run) -> Option<f64>| -> Option<Vec<Vec<(f64, f64)>>> {
-        (0..corners)
-            .map(|c| {
-                m.runs
-                    .iter()
-                    .filter(|r| r.mask as usize == c)
+        observed
+            .iter()
+            .map(|&c| {
+                runs.iter()
+                    .filter(|r| r.mask == c)
                     .map(|r| value(r).map(|v| (r.t, v)))
                     .collect::<Option<Vec<(f64, f64)>>>()
-                    .filter(|v| !v.is_empty())
             })
             .collect()
     };
 
     let targets: Vec<usize> = (0..sensor_names.len())
-        .filter(|&j| sensor_names[j].starts_with(&m.load))
+        .filter(|&j| sensor_names[j].starts_with(load))
         .collect();
     let temp_fits: Vec<CornerFit> = targets
         .iter()
         .filter_map(|&j| group(&|r: &Run| Some(r.temps[j])))
         .map(|g| CornerFit::new(&g))
         .collect();
-    let n_meters = m.runs.first().map_or(0, |r| r.power_w.len());
+    let n_meters = runs.first().map_or(0, |r| r.power_w.len());
     let power_fits: Vec<CornerFit> = (0..n_meters)
         .filter_map(|k| group(&|r: &Run| r.power_w.get(k).copied().flatten()))
         .map(|g| CornerFit::new(&g))
         .collect();
-    // A meter that dropped readings must not silently disable the power
-    // check: without complete evidence, keep every unit.
-    let power_incomplete = power_fits.len() < n_meters;
-    if power_incomplete {
-        eprintln!(
-            "  {} load: a power meter missed readings; keeping every fan",
-            m.load
-        );
-    }
+    let complete = power_fits.len() == n_meters
+        && temp_fits.len() == targets.len()
+        && !targets.is_empty()
+        && full_idx.is_some();
 
-    // Excess temperature over all-max per corner, or None if insufficient.
     let excess = |c: usize| -> Option<f64> {
+        let full = full_idx?;
         let mut total = 0.0;
         for fit in &temp_fits {
             let rise = fit.means[c] - fit.means[full];
@@ -1169,7 +1233,33 @@ fn select_load_profile(
         }
         Some(total)
     };
-    let cost = |c: usize| -> u32 {
+
+    Assessment {
+        corners: observed
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| (c, excess(i)))
+            .collect(),
+        complete,
+    }
+}
+
+/// Pick the cheapest observed fan set (fewest physical fans at full speed)
+/// that `assess` finds sufficient; all-max when the evidence is incomplete.
+fn select_load_profile(
+    m: &PhaseMeasurement,
+    classified: &[ClassifiedFan],
+    sensor_names: &[String],
+) -> LoadProfile {
+    let full = (1u32 << m.units.len()) - 1;
+    let assessment = assess(&m.load, &m.runs, sensor_names);
+    if !assessment.complete {
+        eprintln!(
+            "  {} load: power evidence is incomplete; keeping every fan",
+            m.load
+        );
+    }
+    let cost = |c: u32| -> u32 {
         (0..m.units.len())
             .filter(|bit| c >> bit & 1 == 1)
             .flat_map(|bit| unit_fans(classified, m.units[bit]))
@@ -1177,9 +1267,11 @@ fn select_load_profile(
             .sum()
     };
 
-    let chosen = if temp_fits.len() == targets.len() && !targets.is_empty() && !power_incomplete {
-        (0..corners)
-            .filter_map(|c| excess(c).map(|e| (cost(c), e, c)))
+    let chosen = if assessment.complete {
+        assessment
+            .corners
+            .iter()
+            .filter_map(|&(c, excess)| excess.map(|e| (cost(c), e, c)))
             .min_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)))
             .map_or(full, |(_, _, c)| c)
     } else {
@@ -1188,7 +1280,10 @@ fn select_load_profile(
 
     LoadProfile {
         load: m.load.clone(),
-        sensors: targets.iter().map(|&j| sensor_names[j].clone()).collect(),
+        sensors: (0..sensor_names.len())
+            .filter(|&j| sensor_names[j].starts_with(&m.load))
+            .map(|j| sensor_names[j].clone())
+            .collect(),
         needed_fans: (0..m.units.len())
             .filter(|bit| chosen >> bit & 1 == 1)
             .flat_map(|bit| unit_fans(classified, m.units[bit]))
@@ -1545,6 +1640,47 @@ mod stats_tests {
             tuning.load_profiles[0].needed_fans,
             vec!["cpu_fan", "front", "top"]
         );
+    }
+
+    #[test]
+    fn backward_elimination_scales_past_the_factorial() {
+        // Six single-fan units; only unit 2 (the CPU cooler) matters.
+        let units = 6;
+        let full = (1u32 << units) - 1;
+        let classified: Vec<ClassifiedFan> = (0..units)
+            .map(|i| fan(&format!("fan{i}"), FanRole::DirectCooler, 30, 1))
+            .collect();
+        let names = vec!["cpu".to_string()];
+        let mut i = 0usize;
+        let mut measure = |mask: u32| -> Result<Run> {
+            let noise = [0.1, -0.08, 0.05, -0.1, 0.08, -0.05][i % 6];
+            let t = 60.0 * i as f64;
+            i += 1;
+            let cooler = mask & 0b100 != 0;
+            Ok(Run {
+                mask,
+                pwms: (0..units)
+                    .map(|b| if mask >> b & 1 == 1 { 255 } else { 30 })
+                    .collect(),
+                t,
+                temps: vec![80.0 + if cooler { 0.0 } else { 8.0 } + 0.01 * t + noise],
+                power_w: vec![Some(150.0)],
+            })
+        };
+        let mut runs = Vec::new();
+        backward_elimination(full, &[1; 6], &mut runs, &mut measure, |runs, c| {
+            assess("cpu", runs, &names).accepts(c)
+        })
+        .unwrap();
+        assert_eq!(runs.len(), 2 + 3 * units);
+
+        let m = PhaseMeasurement {
+            load: "cpu".into(),
+            units: (0..units).collect(),
+            runs,
+        };
+        let profile = select_load_profile(&m, &classified, &names);
+        assert_eq!(profile.needed_fans, vec!["fan2"]);
     }
 
     #[test]
