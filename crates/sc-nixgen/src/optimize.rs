@@ -1,4 +1,4 @@
-use sc_core::config::{Config, CurvePoint, FanPosition};
+use sc_core::config::{Config, CurvePoint, FanPosition, SensorCurve};
 use sc_core::ipc::TuningResponse;
 
 /// An optimized fan configuration produced from tuning data.
@@ -6,13 +6,21 @@ pub struct OptimizedFan {
     pub name: String,
     pub sensors: Vec<String>,
     pub curve: Vec<CurvePoint>,
+    pub sensor_curves: Vec<SensorCurve>,
 }
 
 /// Result of optimization: one entry per fan in the original config.
 pub struct OptimizedConfig {
     pub fans: Vec<OptimizedFan>,
     pub has_tuning_data: bool,
+    /// Sensor hysteresis (°C) for the generated config.
+    pub hysteresis: u32,
 }
+
+/// Hysteresis for generated configs: holds the curves through ±3 °C sensor
+/// noise (Zen Tctl swings that much at steady load).
+// ponytail: fixed; derive from the benchmark's residual noise if 3 °C misfits.
+const GENERATED_HYSTERESIS_C: u32 = 3;
 
 /// PWM a generated curve commands at its bottom: direct coolers keep
 /// spinning, case fans may stop.
@@ -82,9 +90,11 @@ pub fn optimize_config(
                                 pwm: p.pwm,
                             })
                             .collect(),
+                        sensor_curves: f.sensor_curves.clone(),
                     })
                     .collect(),
                 has_tuning_data: false,
+                hysteresis: config.hysteresis,
             };
         }
     };
@@ -141,29 +151,36 @@ pub fn optimize_config(
                 needed_sensors
             };
 
-            let max_beta = coupled_sensors
-                .first()
-                .map(|(_, b, _)| b.abs())
-                .unwrap_or(0.0);
-
-            // Compute gamma based on effectiveness
-            let gamma = effectiveness_to_gamma(max_beta);
-
-            // Determine the most important sensor for curve temperature range
-            let primary_sensor = sensors.first().cloned().unwrap_or_default();
-
-            // ponytail: one curve per fan, profiled on the primary sensor; a fan
-            // needed by both CPU and GPU uses the stronger-coupled one's range.
-            let curve = if reserve {
-                generate_reserve_curve(fan_config, &primary_sensor)
-            } else {
-                generate_urgency_curve(fan_config, &primary_sensor, gamma)
+            // Each sensor's curve uses its own thermal range and its own
+            // measured effectiveness; the strongest-coupled sensor's curve is
+            // the fan's default, others with a different range get their own.
+            let curve_for = |sensor: &str| {
+                if reserve {
+                    return generate_reserve_curve(fan_config, sensor);
+                }
+                let beta = coupled_sensors
+                    .iter()
+                    .find(|(s, _, _)| s == sensor)
+                    .map_or(0.0, |(_, b, _)| b.abs());
+                generate_urgency_curve(fan_config, sensor, effectiveness_to_gamma(beta))
             };
+            let primary_sensor = sensors.first().cloned().unwrap_or_default();
+            let curve = curve_for(&primary_sensor);
+            let sensor_curves = sensors
+                .iter()
+                .skip(1)
+                .filter(|s| sensor_thermal_profile(s) != sensor_thermal_profile(&primary_sensor))
+                .map(|s| SensorCurve {
+                    sensor: s.clone(),
+                    curve: curve_for(s),
+                })
+                .collect();
 
             OptimizedFan {
                 name: fan_config.name.clone(),
                 sensors,
                 curve,
+                sensor_curves,
             }
         })
         .collect();
@@ -171,6 +188,7 @@ pub fn optimize_config(
     OptimizedConfig {
         fans,
         has_tuning_data: true,
+        hysteresis: config.hysteresis.max(GENERATED_HYSTERESIS_C),
     }
 }
 
@@ -285,6 +303,7 @@ mod tests {
     #[test]
     fn urgency_curve_has_7_points() {
         let fan = sc_core::config::FanConfig {
+            sensor_curves: Vec::new(),
             name: "test".into(),
             hwmon: "nct6799".into(),
             pwm_index: 1,
@@ -303,6 +322,7 @@ mod tests {
     #[test]
     fn urgency_curve_cpu_range() {
         let fan = sc_core::config::FanConfig {
+            sensor_curves: Vec::new(),
             name: "cpu_fan".into(),
             hwmon: "nct6799".into(),
             pwm_index: 1,
@@ -329,6 +349,7 @@ mod tests {
     #[test]
     fn urgency_curve_case_fan_starts_at_zero() {
         let fan = sc_core::config::FanConfig {
+            sensor_curves: Vec::new(),
             name: "front_fan".into(),
             hwmon: "nct6799".into(),
             pwm_index: 1,
@@ -345,6 +366,7 @@ mod tests {
     #[test]
     fn urgency_curve_convex_below_linear() {
         let fan = sc_core::config::FanConfig {
+            sensor_curves: Vec::new(),
             name: "test".into(),
             hwmon: "nct6799".into(),
             pwm_index: 1,
@@ -375,6 +397,7 @@ mod tests {
     #[test]
     fn optimize_without_tuning_keeps_original() {
         let config = sc_core::config::Config {
+            hysteresis: 0,
             poll_interval_ms: 2000,
             derivative: sc_core::config::DerivativeConfig {
                 window_size: 10,
@@ -388,6 +411,7 @@ mod tests {
                 hwmon_instance: None,
             }],
             fans: vec![sc_core::config::FanConfig {
+                sensor_curves: Vec::new(),
                 name: "fan".into(),
                 hwmon: "nct6799".into(),
                 pwm_index: 1,
@@ -412,6 +436,7 @@ mod tests {
     #[test]
     fn load_profiles_link_only_needed_fans() {
         let case_fan = |name: &str| sc_core::config::FanConfig {
+            sensor_curves: Vec::new(),
             name: name.into(),
             hwmon: "nct6799".into(),
             pwm_index: 1,
@@ -421,6 +446,7 @@ mod tests {
             curve: vec![],
         };
         let mut config = sc_core::config::Config {
+            hysteresis: 0,
             poll_interval_ms: 2000,
             derivative: sc_core::config::DerivativeConfig {
                 window_size: 10,
@@ -458,8 +484,16 @@ mod tests {
         assert_eq!(result.fans[0].sensors, vec!["cpu"]);
         assert_eq!(result.fans[0].curve[0].pwm, 0);
         assert_eq!(result.fans[0].curve[0].temp, 80);
-        // `rear` follows the GPU only, with a full urgency curve.
+        // `rear` follows the GPU only, with a full urgency curve; the junction,
+        // whose normal range is higher, gets its own curve.
         assert_eq!(result.fans[1].sensors, vec!["gpu_edge", "gpu_junction"]);
         assert_eq!(result.fans[1].curve.len(), 7);
+        assert_eq!(result.fans[1].sensor_curves.len(), 1);
+        assert_eq!(result.fans[1].sensor_curves[0].sensor, "gpu_junction");
+        assert_eq!(
+            result.fans[1].sensor_curves[0].curve.last().unwrap().temp,
+            110
+        );
+        assert_eq!(result.hysteresis, 3);
     }
 }

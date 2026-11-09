@@ -118,9 +118,11 @@ pub fn emit_nix_from_detected(config: &Config) -> String {
                         pwm: p.pwm,
                     })
                     .collect(),
+                sensor_curves: f.sensor_curves.clone(),
             })
             .collect(),
         has_tuning_data: false,
+        hysteresis: config.hysteresis,
     };
     let mut output = emit_nix_inner(config, &optimized, None, false);
     output.insert_str(
@@ -169,9 +171,11 @@ fn build_settings(config: &Config, optimized: &OptimizedConfig) -> Settings {
                             pwm: p.pwm,
                         })
                         .collect(),
+                    sensor_curves: opt_fan.sensor_curves.clone(),
                 }
             })
             .collect(),
+        hysteresis: optimized.hysteresis,
         tuning: Tuning {
             ewma_span: config.tuning.ewma_span,
             ccf_buffer_size: config.tuning.ccf_buffer_size,
@@ -289,6 +293,7 @@ struct Settings {
     derivative: Derivative,
     sensors: Vec<Sensor>,
     fans: Vec<Fan>,
+    hysteresis: u32,
     tuning: Tuning,
 }
 
@@ -318,6 +323,8 @@ struct Fan {
     topology: sc_core::config::FanTopology,
     sensors: Vec<String>,
     curve: Vec<CurvePointOut>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    sensor_curves: Vec<sc_core::config::SensorCurve>,
 }
 
 #[derive(serde::Serialize)]
@@ -345,6 +352,7 @@ mod tests {
     #[test]
     fn emit_produces_valid_nix_structure() {
         let config = Config {
+            hysteresis: 0,
             poll_interval_ms: 2000,
             derivative: DerivativeConfig {
                 window_size: 10,
@@ -358,6 +366,7 @@ mod tests {
                 hwmon_instance: None,
             }],
             fans: vec![FanConfig {
+                sensor_curves: Vec::new(),
                 name: "fan".into(),
                 hwmon: "nct6799".into(),
                 pwm_index: 1,
@@ -385,8 +394,10 @@ mod tests {
                     CurvePoint { temp: 45, pwm: 20 },
                     CurvePoint { temp: 85, pwm: 200 },
                 ],
+                sensor_curves: vec![],
             }],
             has_tuning_data: false,
+            hysteresis: 0,
         };
 
         let nix = emit_nix(&config, &optimized, None);

@@ -15,6 +15,11 @@ pub struct Config {
     pub nvidia: Vec<crate::nvidia::NvidiaGpu>,
     #[serde(default)]
     pub tuning: TuningConfig,
+    /// °C a falling sensor reading must drop below its held value before
+    /// fan curves follow it down, so sensor noise (e.g. spiky Zen Tctl)
+    /// does not hunt the fans. 0 follows every reading.
+    #[serde(default)]
+    pub hysteresis: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +151,17 @@ pub struct FanConfig {
     pub sensors: Vec<String>,
     /// Temperature-to-PWM curve points (must be sorted by temp ascending)
     pub curve: Vec<CurvePoint>,
+    /// Curves for individual linked sensors whose normal range differs
+    /// (e.g. GPU junction vs CPU Tctl). Sensors without one use `curve`;
+    /// the fan runs at the highest PWM any linked sensor asks for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sensor_curves: Vec<SensorCurve>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SensorCurve {
+    pub sensor: String,
+    pub curve: Vec<CurvePoint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,38 +175,53 @@ pub struct CurvePoint {
 impl FanConfig {
     /// Linearly interpolate PWM from the curve for a given temperature.
     pub fn interpolate_pwm(&self, temp_c: f64) -> u8 {
-        if self.curve.is_empty() {
-            return 0;
-        }
-
-        let temp = temp_c;
-
-        // Below lowest point
-        if temp <= self.curve[0].temp as f64 {
-            return self.curve[0].pwm;
-        }
-
-        // Above highest point
-        if temp >= self.curve.last().unwrap().temp as f64 {
-            return self.curve.last().unwrap().pwm;
-        }
-
-        // Find the two surrounding points and interpolate
-        for window in self.curve.windows(2) {
-            let lo = &window[0];
-            let hi = &window[1];
-            let lo_temp = lo.temp as f64;
-            let hi_temp = hi.temp as f64;
-
-            if temp >= lo_temp && temp <= hi_temp {
-                let ratio = (temp - lo_temp) / (hi_temp - lo_temp);
-                let pwm = lo.pwm as f64 + ratio * (hi.pwm as f64 - lo.pwm as f64);
-                return pwm.round() as u8;
-            }
-        }
-
-        self.curve.last().unwrap().pwm
+        interpolate(&self.curve, temp_c)
     }
+
+    /// PWM that one linked sensor asks for, via its own curve if it has one.
+    pub fn sensor_pwm(&self, sensor: &str, temp_c: f64) -> u8 {
+        let curve = self
+            .sensor_curves
+            .iter()
+            .find(|c| c.sensor == sensor)
+            .map_or(&self.curve, |c| &c.curve);
+        interpolate(curve, temp_c)
+    }
+}
+
+/// Linearly interpolate PWM from a sorted curve.
+fn interpolate(curve: &[CurvePoint], temp_c: f64) -> u8 {
+    if curve.is_empty() {
+        return 0;
+    }
+
+    let temp = temp_c;
+
+    // Below lowest point
+    if temp <= curve[0].temp as f64 {
+        return curve[0].pwm;
+    }
+
+    // Above highest point
+    if temp >= curve.last().unwrap().temp as f64 {
+        return curve.last().unwrap().pwm;
+    }
+
+    // Find the two surrounding points and interpolate
+    for window in curve.windows(2) {
+        let lo = &window[0];
+        let hi = &window[1];
+        let lo_temp = lo.temp as f64;
+        let hi_temp = hi.temp as f64;
+
+        if temp >= lo_temp && temp <= hi_temp {
+            let ratio = (temp - lo_temp) / (hi_temp - lo_temp);
+            let pwm = lo.pwm as f64 + ratio * (hi.pwm as f64 - lo.pwm as f64);
+            return pwm.round() as u8;
+        }
+    }
+
+    curve.last().unwrap().pwm
 }
 
 pub fn load(path: &Path) -> Result<Config> {
@@ -321,33 +352,22 @@ fn validate(config: &Config) -> Result<()> {
             "fan '{}' must reference at least one sensor",
             fan.name
         );
-        anyhow::ensure!(
-            fan.curve.len() >= 2,
-            "fan '{}' curve must contain at least two points",
-            fan.name
-        );
-
-        // Verify curve is sorted by temperature
-        for window in fan.curve.windows(2) {
+        validate_curve(&fan.name, &fan.curve)?;
+        let mut curve_sensors = HashSet::new();
+        for sc in &fan.sensor_curves {
             anyhow::ensure!(
-                window[0].temp < window[1].temp,
-                "fan '{}' curve must be sorted by ascending temperature",
-                fan.name
-            );
-            anyhow::ensure!(
-                window[0].pwm <= window[1].pwm,
-                "fan '{}' curve PWM must be non-decreasing",
-                fan.name
-            );
-        }
-
-        for point in &fan.curve {
-            anyhow::ensure!(
-                point.temp <= 150,
-                "fan '{}' curve temperature {}°C is outside the supported 0..=150°C range",
+                fan.sensors.contains(&sc.sensor),
+                "fan '{}' has a curve for unlinked sensor '{}'",
                 fan.name,
-                point.temp
+                sc.sensor
             );
+            anyhow::ensure!(
+                curve_sensors.insert(sc.sensor.as_str()),
+                "fan '{}' has two curves for sensor '{}'",
+                fan.name,
+                sc.sensor
+            );
+            validate_curve(&format!("{} ({})", fan.name, sc.sensor), &sc.curve)?;
         }
 
         // Verify all referenced sensors exist
@@ -364,12 +384,42 @@ fn validate(config: &Config) -> Result<()> {
     Ok(())
 }
 
+fn validate_curve(fan: &str, curve: &[CurvePoint]) -> Result<()> {
+    anyhow::ensure!(
+        curve.len() >= 2,
+        "fan '{}' curve must contain at least two points",
+        fan
+    );
+    for window in curve.windows(2) {
+        anyhow::ensure!(
+            window[0].temp < window[1].temp,
+            "fan '{}' curve must be sorted by ascending temperature",
+            fan
+        );
+        anyhow::ensure!(
+            window[0].pwm <= window[1].pwm,
+            "fan '{}' curve PWM must be non-decreasing",
+            fan
+        );
+    }
+    for point in curve {
+        anyhow::ensure!(
+            point.temp <= 150,
+            "fan '{}' curve temperature {}°C is outside the supported 0..=150°C range",
+            fan,
+            point.temp
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn test_fan() -> FanConfig {
         FanConfig {
+            sensor_curves: Vec::new(),
             name: "test".into(),
             hwmon: "nct6799".into(),
             pwm_index: 1,
@@ -392,6 +442,7 @@ mod tests {
 
     fn test_config() -> Config {
         Config {
+            hysteresis: 0,
             poll_interval_ms: 2000,
             derivative: DerivativeConfig {
                 window_size: 10,
@@ -539,6 +590,62 @@ fans = new Listing {
         assert_eq!(config.sensors.len(), 1);
         assert_eq!(config.fans.len(), 1);
         assert_eq!(config.fans[0].curve.len(), 2);
+    }
+
+    #[test]
+    fn parse_sensor_curves_and_hysteresis() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.pkl");
+        let fan = |extra: &str| {
+            format!(
+                r#"
+poll_interval_ms = 2000
+hysteresis = 3
+derivative = new {{
+  window_size = 10
+  boost_threshold = 2.0
+  decay_rate = 0.5
+}}
+sensors = new Listing {{
+  new {{ name = "cpu"; hwmon = "k10temp"; index = 1 }}
+  new {{ name = "gpu_junction"; hwmon = "amdgpu"; index = 2 }}
+}}
+fans = new Listing {{
+  new {{
+    name = "front"
+    hwmon = "nct6799"
+    pwm_index = 1
+    topology = new {{ position = "front"; direction = "intake" }}
+    sensors = new Listing {{ "cpu" "gpu_junction" }}
+    curve = new Listing {{
+      new {{ temp = 45; pwm = 0 }}
+      new {{ temp = 95; pwm = 255 }}
+    }}
+    sensor_curves = new Listing {{
+      new {{
+        sensor = "{extra}"
+        curve = new Listing {{
+          new {{ temp = 50; pwm = 0 }}
+          new {{ temp = 110; pwm = 255 }}
+        }}
+      }}
+    }}
+  }}
+}}
+"#
+            )
+        };
+        std::fs::write(&path, fan("gpu_junction")).unwrap();
+        let config = load(&path).unwrap();
+        assert_eq!(config.hysteresis, 3);
+        assert_eq!(config.fans[0].sensor_pwm("gpu_junction", 80.0), 128);
+        assert_eq!(config.fans[0].sensor_pwm("cpu", 70.0), 128);
+
+        std::fs::write(&path, fan("cpu_ccd1")).unwrap();
+        assert!(load(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("unlinked sensor"));
     }
 
     #[test]

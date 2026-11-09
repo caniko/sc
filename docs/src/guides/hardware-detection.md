@@ -69,8 +69,9 @@ unit, and so is each case-fan `group`; at most four units are allowed. The
 two passes cancel linear heat soak. For each load it records the cheapest
 fan set (fewest physical fans at full speed) that keeps every target sensor
 within noise, or at least 1 °C, of the all-max temperature. It also checks
-CPU package power (RAPL, needs root) or GPU board power stays within 3%, so
-throttling is not mistaken for headroom. `--generate-nix` then links each fan
+CPU package power (RAPL, needs root) or each GPU's board power stays within 3%, so
+throttling is not mistaken for headroom. If only some of the heat source's
+devices report power, or a meter misses readings, every fan is kept. `--generate-nix` then links each fan
 only to the loads that need it. A fan that no load needs gets a reserve
 curve, which holds its floor until the sensor passes its target temperature.
 

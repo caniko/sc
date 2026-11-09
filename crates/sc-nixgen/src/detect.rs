@@ -52,6 +52,7 @@ pub fn build_config(result: &DetectionResult) -> Config {
         .map(|(fan, mapped_sensors)| {
             let curve = select_curve(fan, mapped_sensors);
             FanConfig {
+                sensor_curves: Vec::new(),
                 name: fan.auto_name.clone(),
                 hwmon: fan.hwmon_chip.clone(),
                 pwm_index: fan.pwm_index,
@@ -64,6 +65,7 @@ pub fn build_config(result: &DetectionResult) -> Config {
         .collect();
 
     Config {
+        hysteresis: 0,
         poll_interval_ms: 2000,
         derivative: DerivativeConfig {
             window_size: 10,

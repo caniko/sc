@@ -402,6 +402,7 @@ pub fn prepare_from_detect(result: &DetectionResult, topo: &Topology) -> Result<
             Ok(fan) => {
                 fans.push(fan);
                 fan_configs.push(FanConfig {
+                    sensor_curves: Vec::new(),
                     name: df.auto_name.clone(),
                     hwmon: df.hwmon_chip.clone(),
                     pwm_index: df.pwm_index,
@@ -428,6 +429,7 @@ pub fn prepare_from_detect(result: &DetectionResult, topo: &Topology) -> Result<
     }
 
     let config = Config {
+        hysteresis: 0,
         poll_interval_ms: 2000,
         derivative: DerivativeConfig {
             window_size: 10,
@@ -637,8 +639,9 @@ struct Run {
     t: f64,
     /// Per-sensor mean temperature.
     temps: Vec<f64>,
-    /// Mean heat-source power (W), when a meter is available.
-    power_w: Option<f64>,
+    /// Mean power (W) per heat-source meter (one per GPU, or the CPU
+    /// package); `None` where a reading failed.
+    power_w: Vec<Option<f64>>,
 }
 
 /// Factorial measurements for one heat source.
@@ -820,24 +823,32 @@ pub fn run_benchmark(
             &hw,
             "cpu",
             StressProcess::start_cpu,
-            PowerMeter::cpu(),
+            vec![PowerMeter::cpu()],
         )?);
     }
 
     if has_gpu_sensors {
         eprintln!("\n=== GPU Stress Phase ===");
-        let meter = sensors
-            .iter()
-            .zip(sensor_names)
-            .find(|(_, name)| name.starts_with("gpu"))
-            .and_then(|(sensor, _)| sensor.hwmon_dir())
-            .and_then(PowerMeter::hwmon);
+        // One meter per GPU, so no GPU can throttle unobserved.
+        let mut gpu_dirs: Vec<&std::path::Path> = Vec::new();
+        for (sensor, name) in sensors.iter().zip(sensor_names) {
+            if let Some(dir) = sensor.hwmon_dir().filter(|_| name.starts_with("gpu")) {
+                if !gpu_dirs.contains(&dir) {
+                    gpu_dirs.push(dir);
+                }
+            }
+        }
+        // A GPU without a meter keeps its slot (`None`), so a partially
+        // metered set counts as incomplete evidence rather than silently
+        // ignoring the unmetered GPU.
+        let meters: Vec<Option<PowerMeter>> =
+            gpu_dirs.iter().map(|d| PowerMeter::hwmon(d)).collect();
         measurements.push(run_stress_phase(
             fans,
             &hw,
             "gpu",
             StressProcess::start_gpu,
-            meter,
+            meters,
         )?);
     }
 
@@ -887,7 +898,7 @@ fn run_stress_phase<F>(
     hw: &Hardware,
     load: &str,
     start_stress: F,
-    meter: Option<PowerMeter>,
+    meters: Vec<Option<PowerMeter>>,
 ) -> Result<PhaseMeasurement>
 where
     F: FnOnce() -> Result<StressProcess>,
@@ -905,9 +916,19 @@ where
         5.0,
         hw.interrupt,
     )?;
-    match &meter {
-        Some(m) => eprintln!("  Power meter: {}", m.label()),
-        None => eprintln!("  No power meter: judging fan sets by temperature only"),
+    // No meter at all: judge by temperature only. Some but not all:
+    // keep the empty slots, which makes the evidence incomplete.
+    let meters = if meters.iter().all(Option::is_none) {
+        eprintln!("  No power meter: judging fan sets by temperature only");
+        Vec::new()
+    } else {
+        meters
+    };
+    for m in &meters {
+        match m {
+            Some(m) => eprintln!("  Power meter: {}", m.label()),
+            None => eprintln!("  A heat source has no power meter; every fan will be kept"),
+        }
     }
 
     let watch: Vec<bool> = hw
@@ -931,9 +952,16 @@ where
 
         wait_for_settle(hw.sensors, &watch, hw.interrupt)?;
         let t = start.elapsed().as_secs_f64() + STRESS_SAMPLE_SECS as f64 / 2.0;
-        let power_start = meter.as_ref().and_then(PowerMeter::begin);
+        let power_start: Vec<_> = meters
+            .iter()
+            .map(|m| m.as_ref().and_then(PowerMeter::begin))
+            .collect();
         let temps = sample_temps(hw.sensors, STRESS_SAMPLE_SECS, hw.interrupt)?;
-        let power_w = meter.as_ref().zip(power_start).and_then(|(m, s)| m.end(s));
+        let power_w: Vec<Option<f64>> = meters
+            .iter()
+            .zip(power_start)
+            .map(|(m, s)| m.as_ref().zip(s).and_then(|(m, s)| m.end(s)))
+            .collect();
 
         let mut line: Vec<String> = hw
             .sensor_names
@@ -942,9 +970,7 @@ where
             .filter(|(name, _)| name.starts_with(load))
             .map(|(name, t)| format!("{}={:.1}°C", name, t))
             .collect();
-        if let Some(w) = power_w {
-            line.push(format!("{:.0} W", w));
-        }
+        line.extend(power_w.iter().flatten().map(|w| format!("{:.0} W", w)));
         eprintln!("{}", line.join(", "));
 
         runs.push(Run {
@@ -1110,17 +1136,18 @@ fn select_load_profile(
         .filter_map(|&j| group(&|r: &Run| Some(r.temps[j])))
         .map(|g| CornerFit::new(&g))
         .collect();
-    let power_fit = group(&|r: &Run| r.power_w).map(|g| CornerFit::new(&g));
+    let n_meters = m.runs.first().map_or(0, |r| r.power_w.len());
+    let power_fits: Vec<CornerFit> = (0..n_meters)
+        .filter_map(|k| group(&|r: &Run| r.power_w.get(k).copied().flatten()))
+        .map(|g| CornerFit::new(&g))
+        .collect();
     // A meter that dropped readings must not silently disable the power
     // check: without complete evidence, keep every unit.
-    let powered = m.runs.iter().filter(|r| r.power_w.is_some()).count();
-    let power_incomplete = powered > 0 && powered < m.runs.len();
+    let power_incomplete = power_fits.len() < n_meters;
     if power_incomplete {
         eprintln!(
-            "  {} load: {}/{} runs lack power readings; keeping every fan",
-            m.load,
-            m.runs.len() - powered,
-            m.runs.len()
+            "  {} load: a power meter missed readings; keeping every fan",
+            m.load
         );
     }
 
@@ -1134,7 +1161,7 @@ fn select_load_profile(
             }
             total += rise;
         }
-        if let Some(fit) = &power_fit {
+        for fit in &power_fits {
             let floor = MIN_POWER_TOLERANCE * fit.means[full];
             if fit.means[full] - fit.means[c] > fit.tolerance(c, full, floor) {
                 return None;
@@ -1382,7 +1409,7 @@ mod stats_tests {
                     pwms: vec![if cooler { 255 } else { 30 }, if case { 255 } else { 0 }],
                     t,
                     temps: vec![temp(cooler, case) + soak, 40.0 + soak],
-                    power_w: Some(power(cooler, case)),
+                    power_w: vec![Some(power(cooler, case))],
                 }
             })
             .collect();
@@ -1483,8 +1510,37 @@ mod stats_tests {
             |_, _| 90.0,
             |cooler, _| if cooler { 200.0 } else { 160.0 },
         );
-        cpu.runs[3].power_w = None;
+        cpu.runs[3].power_w = vec![None];
         let tuning = compute_tuning(&[cpu], &classified(), &names);
+        assert_eq!(
+            tuning.load_profiles[0].needed_fans,
+            vec!["cpu_fan", "front", "top"]
+        );
+    }
+
+    #[test]
+    fn every_gpu_meter_must_hold_its_power() {
+        let names = vec!["gpu0_edge".to_string(), "board".to_string()];
+        // Temperatures are pinned; GPU 1 (second meter) loses 25% power
+        // unless the case fans run.
+        let mut gpu = simulate("gpu", |_, _| 85.0, |_, _| 250.0);
+        for r in &mut gpu.runs {
+            r.power_w
+                .push(Some(if r.mask & 2 == 2 { 200.0 } else { 150.0 }));
+        }
+        let tuning = compute_tuning(&[gpu], &classified(), &names);
+        assert_eq!(tuning.load_profiles[0].needed_fans, vec!["front", "top"]);
+    }
+
+    #[test]
+    fn an_unmetered_gpu_beside_a_metered_one_keeps_every_fan() {
+        let names = vec!["gpu0_edge".to_string(), "board".to_string()];
+        // GPU 0 is metered and steady; GPU 1 has no meter (slot is None).
+        let mut gpu = simulate("gpu", |_, _| 85.0, |_, _| 250.0);
+        for r in &mut gpu.runs {
+            r.power_w.push(None);
+        }
+        let tuning = compute_tuning(&[gpu], &classified(), &names);
         assert_eq!(
             tuning.load_profiles[0].needed_fans,
             vec!["cpu_fan", "front", "top"]

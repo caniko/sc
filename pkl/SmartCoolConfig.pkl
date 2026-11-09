@@ -39,6 +39,12 @@ class FanConfig {
   topology: FanTopology
   sensors: Listing<String>
   curve: Listing<CurvePoint>
+  sensor_curves: Listing<SensorCurve> = new {}
+}
+
+class SensorCurve {
+  sensor: String
+  curve: Listing<CurvePoint>
 }
 
 class NvidiaCurvePoint {
@@ -65,3 +71,6 @@ sensors: Listing<SensorConfig> = new {}
 fans: Listing<FanConfig> = new {}
 nvidia: Listing<NvidiaGpu> = new {}
 tuning: TuningConfig = new {}
+/// °C a falling sensor reading must drop below its held value before fan
+/// curves follow it down.
+hysteresis: UInt = 0

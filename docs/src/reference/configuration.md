@@ -12,6 +12,7 @@ Top-level fields:
 - `fans`: PWM fan definitions. At least one is required unless only `nvidia` is configured.
 - `nvidia`: optional list of NVIDIA GPUs driven through NVML (see below).
 - `tuning`: optional advanced tuning settings. Defaults are applied when omitted.
+- `hysteresis`: optional degrees C (default `0`). A falling sensor reading must drop more than this below its held value before the fan curves follow it down; rises apply at once. `sc-nixgen` writes `3` into generated configs.
 
 `derivative` fields:
 
@@ -35,6 +36,7 @@ Each fan has:
 - `topology`: physical position, airflow direction, and optional group.
 - `sensors`: names of sensors that drive the fan.
 - `curve`: temperature-to-PWM points sorted by ascending temperature.
+- `sensor_curves`: optional list of `{ sensor, curve }` for linked sensors whose normal range differs, such as a GPU junction next to CPU Tctl. Sensors without one use `curve`. The fan runs at the highest PWM any linked sensor asks for.
 
 Supported fan positions are `front`, `rear`, `top`, `bottom`, `side`, `cpu_cooler`, and `gpu_cooler`.
 
@@ -46,8 +48,9 @@ Curve validation requires:
 - Curve temperatures are strictly ascending.
 - Curve PWM values are non-decreasing.
 - Every sensor referenced by a fan exists in `sensors`.
+- Each `sensor_curves` entry names a sensor linked to that fan, at most once, and its curve follows the same rules.
 
-If any sensor linked to a fan is unavailable or outside `0<temp<=150C`, the daemon commands that fan to PWM `255` until every linked sensor is valid again.
+If any sensor linked to a fan is unavailable or outside `0<temp<=150C`, the daemon commands that fan to PWM `255` until every linked sensor is valid again. Sensors on a runtime-suspended GPU are skipped instead; a fan whose linked sensors are all suspended idles at its curve floor.
 
 Tuning defaults:
 

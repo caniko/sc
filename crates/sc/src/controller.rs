@@ -37,7 +37,8 @@ pub fn run_daemon(config_path: &Path) -> Result<()> {
     let config = sc_core::config::load(config_path)?;
 
     // Resolve sensors
-    let mut sensors: Vec<(Sensor, DerivativeTracker)> = Vec::new();
+    // (sensor, derivative window, hysteresis-held temperature)
+    let mut sensors: Vec<(Sensor, DerivativeTracker, Option<f64>)> = Vec::new();
     for sc in &config.sensors {
         let sensor = Sensor::from_config(&sc.name, &sc.hwmon, sc.index, sc.hwmon_instance)
             .with_context(|| format!("failed to initialize sensor '{}'", sc.name))?;
@@ -48,7 +49,7 @@ pub fn run_daemon(config_path: &Path) -> Result<()> {
             index = sc.index,
             "initialized sensor"
         );
-        sensors.push((sensor, tracker));
+        sensors.push((sensor, tracker, None));
     }
 
     // NVML fans: validated against the hardware before any are touched. The
@@ -214,7 +215,7 @@ fn sleep_interruptibly(shutdown: &AtomicBool, duration: Duration) {
 
 fn control_tick(
     config: &Config,
-    sensors: &mut [(Sensor, DerivativeTracker)],
+    sensors: &mut [(Sensor, DerivativeTracker, Option<f64>)],
     fans: &mut [Fan],
     managed_fans: &mut [ManagedFan],
     thermal_system: &mut ThermalSystem,
@@ -229,11 +230,12 @@ fn control_tick(
     let mut sensor_derivatives: HashMap<String, f64> = HashMap::new();
     let mut parked: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for (sensor, tracker) in sensors.iter_mut() {
+    for (sensor, tracker, held) in sensors.iter_mut() {
         if sensor.is_parked() {
             // Restart the derivative window so a resumed GPU is not compared
             // against readings from before it slept.
             *tracker = DerivativeTracker::new(config.derivative.window_size);
+            *held = None;
             parked.insert(sensor.name.clone());
             continue;
         }
@@ -241,7 +243,8 @@ fn control_tick(
             Ok(temp) if temp > 0.0 && temp <= 150.0 => {
                 tracker.push(temp);
                 let dt = tracker.dt_per_second();
-                sensor_temps.insert(sensor.name.clone(), temp);
+                *held = Some(hold(*held, temp, config.hysteresis));
+                sensor_temps.insert(sensor.name.clone(), held.unwrap_or(temp));
                 sensor_derivatives.insert(sensor.name.clone(), dt);
             }
             Ok(temp) => {
@@ -265,7 +268,7 @@ fn control_tick(
         );
 
         let (base_pwm, boost, target_pwm) = if let Some((max_temp, max_dt)) = readings {
-            let base_pwm = fan_config.interpolate_pwm(max_temp);
+            let base_pwm = base_pwm(fan_config, &sensor_temps, &parked);
             mf.derivative_boost = next_boost(
                 mf.derivative_boost,
                 max_temp,
@@ -330,7 +333,7 @@ fn control_tick(
     // Build IPC state
     let status_sensors: Vec<ipc::SensorStatus> = sensors
         .iter()
-        .map(|(sensor, tracker)| ipc::SensorStatus {
+        .map(|(sensor, tracker, _)| ipc::SensorStatus {
             name: sensor.name.clone(),
             temp_c: tracker.latest_temp().unwrap_or(0.0),
             dt_per_sec: tracker.dt_per_second(),
@@ -414,6 +417,30 @@ fn control_tick(
     }
 
     Ok(())
+}
+
+/// Temperature the curves see: a falling reading holds the previous value
+/// until it drops more than `hysteresis` °C below it.
+fn hold(held: Option<f64>, temp: f64, hysteresis: u32) -> f64 {
+    match held {
+        Some(h) if temp < h && h - temp <= f64::from(hysteresis) => h,
+        _ => temp,
+    }
+}
+
+/// Highest PWM any active linked sensor asks for through its own curve
+/// (or the fan's default curve); the curve floor when all are parked.
+fn base_pwm(
+    fan: &sc_core::config::FanConfig,
+    temps: &HashMap<String, f64>,
+    parked: &std::collections::HashSet<String>,
+) -> u8 {
+    fan.sensors
+        .iter()
+        .filter(|s| !parked.contains(*s))
+        .filter_map(|s| temps.get(s).map(|&t| fan.sensor_pwm(s, t)))
+        .max()
+        .unwrap_or_else(|| fan.interpolate_pwm(f64::NEG_INFINITY))
 }
 
 /// Derivative boost for the next tick.
@@ -534,6 +561,42 @@ mod tests {
             linked_sensor_maxima(&names, &temperatures, &derivatives, &Default::default()),
             Some((80.0, 2.0))
         );
+    }
+
+    #[test]
+    fn hysteresis_holds_small_drops_only() {
+        assert_eq!(hold(None, 80.0, 3), 80.0);
+        assert_eq!(hold(Some(80.0), 78.0, 3), 80.0);
+        assert_eq!(hold(Some(80.0), 76.0, 3), 76.0);
+        assert_eq!(hold(Some(80.0), 85.0, 3), 85.0);
+        assert_eq!(hold(Some(80.0), 79.0, 0), 79.0);
+    }
+
+    #[test]
+    fn each_sensor_drives_its_own_curve() {
+        let point = |temp, pwm| sc_core::config::CurvePoint { temp, pwm };
+        let fan = sc_core::config::FanConfig {
+            name: "front".into(),
+            hwmon: "nct6799".into(),
+            pwm_index: 1,
+            hwmon_instance: None,
+            topology: sc_core::config::FanTopology {
+                position: sc_core::config::FanPosition::Front,
+                direction: sc_core::config::AirflowDirection::Intake,
+                group: None,
+            },
+            sensors: vec!["cpu".into(), "gpu_junction".into()],
+            curve: vec![point(45, 0), point(95, 255)],
+            sensor_curves: vec![sc_core::config::SensorCurve {
+                sensor: "gpu_junction".into(),
+                curve: vec![point(50, 0), point(110, 255)],
+            }],
+        };
+        let temps = HashMap::from([("cpu".to_owned(), 45.0), ("gpu_junction".to_owned(), 95.0)]);
+        // 95 °C junction is ~75% of its own range, not full speed.
+        assert_eq!(base_pwm(&fan, &temps, &Default::default()), 191);
+        let parked = std::collections::HashSet::from(["cpu".to_owned(), "gpu_junction".to_owned()]);
+        assert_eq!(base_pwm(&fan, &HashMap::new(), &parked), 0);
     }
 
     #[test]
