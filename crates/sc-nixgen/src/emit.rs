@@ -52,7 +52,9 @@ fn emit_nix_inner(
     }
     if !optimized.has_tuning_data {
         out.push_str("# WARNING: No tuning data available, using original curves unchanged\n");
-        out.push_str("# Run `sc-nixgen benchmark --apply` to measure coupling, then re-run sc-nixgen\n");
+        out.push_str(
+            "# Run `sc-nixgen benchmark --apply` to measure coupling, then re-run sc-nixgen\n",
+        );
     }
 
     // Detect unique hwmon chips for kernel modules
