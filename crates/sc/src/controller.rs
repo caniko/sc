@@ -130,6 +130,7 @@ pub fn run_daemon(config_path: &Path) -> Result<()> {
         tuning: ipc::TuningResponse {
             coupling_matrix: Vec::new(),
             step_responses: Vec::new(),
+            load_profiles: Vec::new(),
             cross_correlations: Vec::new(),
             thermal_integrals: Vec::new(),
         },
@@ -389,6 +390,7 @@ fn control_tick(
                 baseline: i.baseline,
             })
             .collect(),
+        load_profiles: Vec::new(),
     };
 
     if let Ok(mut state) = shared_state.lock() {

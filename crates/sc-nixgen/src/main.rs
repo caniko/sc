@@ -5,6 +5,7 @@ mod interrupt;
 mod nvidia_bench;
 mod optimize;
 mod pkl_format;
+mod power;
 mod stress;
 
 use anyhow::{Context, Result};

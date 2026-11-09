@@ -6,16 +6,14 @@ use sc_core::config::{
     AirflowDirection, Config, CurvePoint, DerivativeConfig, FanConfig, FanPosition, FanTopology,
     SensorConfig,
 };
-use sc_core::ipc::{CouplingEntry, TuningResponse};
+use sc_core::ipc::{CouplingEntry, LoadProfile, TuningResponse};
 use sc_detect::DetectionResult;
 use sc_hwmon::fan::{Fan, FanControlGuard};
 use sc_hwmon::sensor::Sensor;
 
 use crate::interrupt::InterruptGuard;
+use crate::power::PowerMeter;
 use crate::stress::StressProcess;
-
-/// PWM levels for the targeted sweep (low, mid, high, max).
-const PWM_LEVELS: &[u8] = &[40, 100, 180, 255];
 
 /// Polling interval during sampling (ms).
 const POLL_MS: u64 = 500;
@@ -283,6 +281,10 @@ enum FanRole {
 struct ClassifiedFan {
     name: String,
     role: FanRole,
+    /// PWM that generated curves command at their bottom.
+    floor_pwm: u8,
+    /// Physical fans on this header (sum of position counts).
+    fan_count: u32,
 }
 
 type PreparedHardware = (Vec<Fan>, Vec<Sensor>, Vec<String>, Config);
@@ -331,6 +333,8 @@ fn classify_fans(topo: &Topology) -> Result<Vec<ClassifiedFan>> {
         classified.push(ClassifiedFan {
             name: ft.name.clone(),
             role,
+            floor_pwm: crate::optimize::floor_pwm(&position),
+            fan_count: ft.positions.iter().map(|p| p.count).sum(),
         });
     }
 
@@ -609,84 +613,64 @@ fn read_temperatures(sensors: &[Sensor]) -> Result<Vec<f64>> {
         .collect()
 }
 
-// ─── Stall detection ────────────────────────────────────────────────────────
-
-fn find_stall_threshold(fan: &mut Fan, interrupt: &InterruptGuard) -> Result<u8> {
-    let mut lo: u8 = 0;
-    let mut hi: u8 = 80;
-    let mut stall_pwm: u8 = 0;
-
-    let actual_hi = write_pwm_safe(fan, hi)?;
-    interrupt.sleep(Duration::from_secs(3))?;
-    let rpm = fan.read_rpm().unwrap_or(0);
-    if rpm == 0 {
-        return Ok(0);
-    }
-
-    lo = lo.max(actual_hi.saturating_sub(hi));
-
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        let actual = write_pwm_safe(fan, mid)?;
-        interrupt.sleep(Duration::from_secs(2))?;
-        let rpm = fan.read_rpm().unwrap_or(0);
-
-        if rpm > 0 {
-            stall_pwm = actual;
-            hi = mid;
-        } else {
-            lo = mid + 1;
-        }
-
-        if hi - lo <= 3 {
-            break;
-        }
-    }
-
-    Ok(stall_pwm)
-}
-
 // ─── Benchmark ──────────────────────────────────────────────────────────────
 
-/// Per-fan measurement data collected during a stress phase.
+/// Sweep units per phase; a full factorial costs 2·2^k runs.
+// ponytail: full factorial only; add a fractional design if hosts need >4 units.
+const MAX_SWEEP_UNITS: usize = 4;
+
+/// A fan set suffices for a load when every target sensor stays within this
+/// (or the measured noise, whichever is larger) of the all-max temperature...
+const MIN_TEMP_TOLERANCE_C: f64 = 1.0;
+
+/// ...and heat-source power stays within this fraction of all-max power, so
+/// a temperature-limited CPU that throttles is not mistaken for a cool one.
+const MIN_POWER_TOLERANCE: f64 = 0.03;
+
+/// One factorial run under stress.
+struct Run {
+    /// Bit i set: unit i at full speed; clear: at its floor PWM.
+    mask: u32,
+    /// Applied PWM per unit.
+    pwms: Vec<u8>,
+    /// Seconds since the phase's first run, at the middle of sampling.
+    t: f64,
+    /// Per-sensor mean temperature.
+    temps: Vec<f64>,
+    /// Mean heat-source power (W), when a meter is available.
+    power_w: Option<f64>,
+}
+
+/// Factorial measurements for one heat source.
 struct PhaseMeasurement {
-    fan_name: String,
-    /// For each PWM level: (pwm, seconds since sweep start, per-sensor average temps)
-    readings: Vec<(u8, f64, Vec<f64>)>,
+    /// Heat-source prefix ("cpu"/"gpu"); also selects the target sensors.
+    load: String,
+    /// Indices into the classified fans, one per sweep unit (bit order).
+    units: Vec<usize>,
+    runs: Vec<Run>,
 }
 
-/// Order sweep levels so PWM is not monotone in time, then repeat the first
-/// (highest) level at the end.
+/// Two-level full factorial over `k` units, as a Gray-code pass starting at
+/// all-max followed by the same pass reversed.
 ///
-/// A monotone high→low sweep makes PWM perfectly collinear with elapsed time,
-/// so any residual heat soak is attributed to the fan. Alternating extremes
-/// plus a repeated reference make a linear drift term identifiable.
-fn sweep_order(mut levels: Vec<u8>) -> Vec<u8> {
-    levels.sort_unstable_by(|a, b| b.cmp(a));
-    levels.dedup();
-    let mut order = Vec::with_capacity(levels.len() + 1);
-    let (mut lo, mut hi) = (0, levels.len());
-    while lo < hi {
-        order.push(levels[lo]);
-        lo += 1;
-        if lo < hi {
-            hi -= 1;
-            order.push(levels[hi]);
-        }
-    }
-    if let Some(&first) = order.first() {
-        order.push(first);
-    }
-    order
+/// Consecutive runs differ by one fan, so each settle is short, and every
+/// corner's mean run index is identical, so linear heat soak cancels out of
+/// corner comparisons and is orthogonal to every fan effect.
+fn factorial_order(k: usize) -> Vec<u32> {
+    let full = (1u32 << k) - 1;
+    let pass: Vec<u32> = (0..1u32 << k).map(|i| full ^ (i ^ (i >> 1))).collect();
+    pass.iter().chain(pass.iter().rev()).copied().collect()
 }
 
-/// Run stress-based thermal coupling benchmark.
+/// Run the stress benchmark.
 ///
 /// Protocol:
-/// 1. Pre-flight: controllability check, stall detection
-/// 2. CPU stress phase: built-in FP thread pool → sweep fans → measure CPU sensor coupling
-/// 3. GPU stress phase: force max GPU clocks → sweep fans → measure GPU sensor coupling
-/// 4. Compute coupling matrix from measurements
+/// 1. Pre-flight: controllability check
+/// 2. Idle baseline at full cooling
+/// 3. Per heat source (CPU, then GPU): start stress, then run a two-level
+///    full factorial over the sweep units (direct coolers and one fan per
+///    case group), recording temperatures and heat-source power
+/// 4. Fit couplings and pick each load's cheapest sufficient fan set
 pub fn run_benchmark(
     fans: &mut [Fan],
     sensors: &[Sensor],
@@ -700,37 +684,7 @@ pub fn run_benchmark(
     let mut control = FanControlGuard::new(fans);
     let fans = control.fans_mut();
 
-    let classified = classify_fans(topo)?;
-    let n_sweepable = classified
-        .iter()
-        .filter(|c| !matches!(c.role, FanRole::CaseFollower { .. }))
-        .count();
-
-    let has_cpu_sensors = sensor_names.iter().any(|s| s.starts_with("cpu"));
-    let has_gpu_sensors = sensor_names.iter().any(|s| s.starts_with("gpu"));
-    let n_phases = has_cpu_sensors as usize + has_gpu_sensors as usize;
-
-    eprintln!(
-        "Stress benchmark: {} fans ({} to sweep), {} sensors, {} stress phase(s)",
-        fans.len(),
-        n_sweepable,
-        sensors.len(),
-        n_phases,
-    );
-
-    // Per level: settle (SETTLE_MIN_SECS..SETTLE_MAX_SECS) + sample; levels =
-    // PWM_LEVELS + stall level + the repeated reference level.
-    let levels = PWM_LEVELS.len() as u64 + 2;
-    let per_level = |settle: f64| settle as u64 + STRESS_SAMPLE_SECS;
-    let est = |settle: f64| {
-        30 + n_phases as u64
-            * (STRESS_WARMUP_SECS + n_sweepable as u64 * levels * per_level(settle))
-    };
-    eprintln!(
-        "Estimated duration: {}-{} minutes",
-        est(SETTLE_MIN_SECS) / 60 + 1,
-        est(SETTLE_MAX_SECS) / 60 + 1
-    );
+    let mut classified = classify_fans(topo)?;
 
     // ── Pre-flight: controllability check ───────────────────────────────────
 
@@ -763,23 +717,73 @@ pub fn run_benchmark(
     }
     eprintln!("{}/{} fans controllable", n_controllable, fans.len());
 
-    // ── Pre-flight: stall detection ─────────────────────────────────────────
-
-    eprintln!("\n=== Stall detection ===");
-    let mut stall_thresholds: std::collections::HashMap<String, u8> =
-        std::collections::HashMap::new();
-    for (fan, &is_ctrl) in fans.iter_mut().zip(controllable.iter()) {
-        interrupt.check()?;
-        if !is_ctrl {
-            eprintln!("  {} ... skipped (not controllable)", fan.name);
+    // Classified fan -> index of its controllable fan, matched by name
+    // (prepare_from_detect may have skipped fans it could not open).
+    let fan_idx: Vec<Option<usize>> = classified
+        .iter()
+        .map(|c| {
+            fans.iter()
+                .position(|f| f.name == c.name)
+                .filter(|&i| controllable[i])
+        })
+        .collect();
+    // A group whose representative cannot be driven is swept through its
+    // first controllable follower instead, so the group is still measured.
+    for u in 0..classified.len() {
+        let FanRole::CaseFollower { representative } = classified[u].role.clone() else {
+            continue;
+        };
+        let rep_ok = classified
+            .iter()
+            .zip(&fan_idx)
+            .any(|(c, i)| c.name == representative && i.is_some());
+        if rep_ok || fan_idx[u].is_none() {
             continue;
         }
-        eprint!("  {} ... ", fan.name);
-        let stall = find_stall_threshold(fan, &interrupt)?;
-        eprintln!("stall PWM = {}", stall);
-        stall_thresholds.insert(fan.name.clone(), stall);
-        write_pwm_safe(fan, 0)?;
+        let new_rep = classified[u].name.clone();
+        eprintln!("  group of '{representative}' is swept through '{new_rep}'");
+        for c in classified.iter_mut() {
+            if matches!(&c.role, FanRole::CaseFollower { representative: r } if *r == representative)
+            {
+                c.role = if c.name == new_rep {
+                    FanRole::CaseRepresentative
+                } else {
+                    FanRole::CaseFollower {
+                        representative: new_rep.clone(),
+                    }
+                };
+            }
+        }
     }
+    let units: Vec<usize> = (0..classified.len())
+        .filter(|&u| {
+            fan_idx[u].is_some() && !matches!(classified[u].role, FanRole::CaseFollower { .. })
+        })
+        .collect();
+    anyhow::ensure!(!units.is_empty(), "no controllable fans to sweep");
+    anyhow::ensure!(
+        units.len() <= MAX_SWEEP_UNITS,
+        "{} sweep units exceed the factorial limit of {}; put case fans that \
+         should move together into a topology `group`",
+        units.len(),
+        MAX_SWEEP_UNITS
+    );
+
+    let has_cpu_sensors = sensor_names.iter().any(|s| s.starts_with("cpu"));
+    let has_gpu_sensors = sensor_names.iter().any(|s| s.starts_with("gpu"));
+    let n_phases = has_cpu_sensors as u64 + has_gpu_sensors as u64;
+    let runs = 2u64 << units.len();
+    let est = |settle: f64| {
+        30 + n_phases * (STRESS_WARMUP_SECS + runs * (settle as u64 + STRESS_SAMPLE_SECS))
+    };
+    eprintln!(
+        "Stress benchmark: {} sweep unit(s), {} runs per phase, {} phase(s), ~{}-{} minutes",
+        units.len(),
+        runs,
+        n_phases,
+        est(SETTLE_MIN_SECS) / 60 + 1,
+        est(SETTLE_MAX_SECS) / 60 + 1
+    );
 
     // ── Idle baseline ───────────────────────────────────────────────────────
 
@@ -798,49 +802,61 @@ pub fn run_benchmark(
 
     // ── Stress phases ───────────────────────────────────────────────────────
 
-    let mut all_measurements: Vec<PhaseMeasurement> = Vec::new();
+    let hw = Hardware {
+        sensors,
+        sensor_names,
+        classified: &classified,
+        fan_idx: &fan_idx,
+        units: &units,
+        baseline: &baseline,
+        interrupt: &interrupt,
+    };
+    let mut measurements: Vec<PhaseMeasurement> = Vec::new();
 
     if has_cpu_sensors {
         eprintln!("\n=== CPU Stress Phase ===");
-        let phase_measurements = run_stress_phase(
+        measurements.push(run_stress_phase(
             fans,
-            sensors,
-            sensor_names,
-            &classified,
-            &controllable,
-            &stall_thresholds,
-            &baseline,
-            &interrupt,
+            &hw,
             "cpu",
             StressProcess::start_cpu,
-        )?;
-        all_measurements.extend(phase_measurements);
+            PowerMeter::cpu(),
+        )?);
     }
 
     if has_gpu_sensors {
         eprintln!("\n=== GPU Stress Phase ===");
-        let phase_measurements = run_stress_phase(
+        let meter = sensors
+            .iter()
+            .zip(sensor_names)
+            .find(|(_, name)| name.starts_with("gpu"))
+            .and_then(|(sensor, _)| sensor.hwmon_dir())
+            .and_then(PowerMeter::hwmon);
+        measurements.push(run_stress_phase(
             fans,
-            sensors,
-            sensor_names,
-            &classified,
-            &controllable,
-            &stall_thresholds,
-            &baseline,
-            &interrupt,
+            &hw,
             "gpu",
             StressProcess::start_gpu,
-        )?;
-        all_measurements.extend(phase_measurements);
+            meter,
+        )?);
     }
 
-    // ── Compute coupling matrix ─────────────────────────────────────────────
-
-    let tuning = compute_tuning(&all_measurements, &classified, sensor_names);
+    let tuning = compute_tuning(&measurements, &classified, sensor_names);
     eprintln!(
         "\nBenchmark complete. {} coupling entries.",
         tuning.coupling_matrix.len()
     );
+    for profile in &tuning.load_profiles {
+        eprintln!(
+            "  {} load needs: {}",
+            profile.load,
+            if profile.needed_fans.is_empty() {
+                "no fans above their floor".to_string()
+            } else {
+                profile.needed_fans.join(", ")
+            }
+        );
+    }
     let uncontrollable = fans
         .iter()
         .zip(&controllable)
@@ -854,156 +870,312 @@ pub fn run_benchmark(
     Ok((tuning, uncontrollable))
 }
 
-/// Run a single stress phase (CPU or GPU):
-/// 1. Start stress workload
-/// 2. Wait for target sensors to warm up
-/// 3. Sweep each fan through PWM levels, measuring sensor temps
-/// 4. Stop stress
-#[allow(clippy::too_many_arguments)]
+/// Read-only benchmark context shared by every stress phase.
+struct Hardware<'a> {
+    sensors: &'a [Sensor],
+    sensor_names: &'a [String],
+    classified: &'a [ClassifiedFan],
+    fan_idx: &'a [Option<usize>],
+    units: &'a [usize],
+    baseline: &'a [f64],
+    interrupt: &'a InterruptGuard,
+}
+
+/// Run one heat source's factorial under stress.
 fn run_stress_phase<F>(
     fans: &mut [Fan],
-    sensors: &[Sensor],
-    sensor_names: &[String],
-    classified: &[ClassifiedFan],
-    controllable: &[bool],
-    stall_thresholds: &std::collections::HashMap<String, u8>,
-    baseline: &[f64],
-    interrupt: &InterruptGuard,
-    target_prefix: &str,
+    hw: &Hardware,
+    load: &str,
     start_stress: F,
-) -> Result<Vec<PhaseMeasurement>>
+    meter: Option<PowerMeter>,
+) -> Result<PhaseMeasurement>
 where
     F: FnOnce() -> Result<StressProcess>,
 {
-    // Start stress workload
+    let full = (1u32 << hw.units.len()) - 1;
     let mut stress = start_stress()?;
+    set_units(fans, hw, full)?;
 
-    // Set all controllable fans to max during warmup so temps rise from workload, not fans
-    for (fan, &is_ctrl) in fans.iter_mut().zip(controllable.iter()) {
-        if is_ctrl {
-            write_pwm_safe(fan, 255)?;
-        }
-    }
-
-    // Wait for target temps to rise
-    eprintln!("  Waiting for {} temps to rise...", target_prefix);
+    eprintln!("  Waiting for {} temps to rise...", load);
     wait_for_stress_warmup(
-        sensors,
-        sensor_names,
-        target_prefix,
-        baseline,
+        hw.sensors,
+        hw.sensor_names,
+        load,
+        hw.baseline,
         5.0,
-        interrupt,
+        hw.interrupt,
     )?;
-
-    // Sample stressed baseline (at max fan speed)
-    let stressed_baseline = sample_temps(sensors, 3, interrupt)?;
-    eprintln!("  Stressed temperatures (fans at max):");
-    for (i, name) in sensor_names.iter().enumerate() {
-        if name.starts_with(target_prefix) {
-            eprintln!(
-                "    {} = {:.1}°C (+{:.1}°C from idle)",
-                name,
-                stressed_baseline[i],
-                stressed_baseline[i] - baseline[i]
-            );
-        }
+    match &meter {
+        Some(m) => eprintln!("  Power meter: {}", m.label()),
+        None => eprintln!("  No power meter: judging fan sets by temperature only"),
     }
 
-    // Sweep each fan while stress continues
-    let mut measurements = Vec::new();
-
-    for (fan_idx, cf) in classified.iter().enumerate() {
-        interrupt.check()?;
-        if !controllable[fan_idx] {
-            continue;
-        }
-
-        if let FanRole::CaseFollower { .. } = cf.role {
-            continue;
-        }
-
-        eprintln!(
-            "\n  --- Sweeping: {} ({:?}) under {} stress ---",
-            cf.name, cf.role, target_prefix
-        );
-
-        // Set all OTHER fans to max cooling so only the swept fan's effect is measured
-        for (i, fan) in fans.iter_mut().enumerate() {
-            if i != fan_idx && controllable[i] {
-                write_pwm_safe(fan, 255)?;
-            }
-        }
-
-        let stall = *stall_thresholds.get(&cf.name).unwrap_or(&0);
-        let mut readings = Vec::new();
-
-        let mut levels: Vec<u8> = PWM_LEVELS.iter().copied().filter(|&p| p > stall).collect();
-        levels.insert(0, stall.max(1));
-        let effective_levels = sweep_order(levels);
-        let watch: Vec<bool> = sensor_names
+    let watch: Vec<bool> = hw
+        .sensor_names
+        .iter()
+        .map(|n| n.starts_with(load))
+        .collect();
+    let start = std::time::Instant::now();
+    let mut runs = Vec::new();
+    for mask in factorial_order(hw.units.len()) {
+        hw.interrupt.check()?;
+        let pwms = set_units(fans, hw, mask)?;
+        let at_max: Vec<&str> = hw
+            .units
             .iter()
-            .map(|n| n.starts_with(target_prefix))
+            .enumerate()
+            .filter(|(bit, _)| mask >> bit & 1 == 1)
+            .map(|(_, &u)| hw.classified[u].name.as_str())
             .collect();
-        let sweep_start = std::time::Instant::now();
+        eprint!("    max=[{}] ... ", at_max.join(","));
 
-        for &pwm in &effective_levels {
-            interrupt.check()?;
-            eprint!("    PWM={:>3} ... ", pwm);
-            let pwm = write_pwm_safe(&mut fans[fan_idx], pwm)?;
+        wait_for_settle(hw.sensors, &watch, hw.interrupt)?;
+        let t = start.elapsed().as_secs_f64() + STRESS_SAMPLE_SECS as f64 / 2.0;
+        let power_start = meter.as_ref().and_then(PowerMeter::begin);
+        let temps = sample_temps(hw.sensors, STRESS_SAMPLE_SECS, hw.interrupt)?;
+        let power_w = meter.as_ref().zip(power_start).and_then(|(m, s)| m.end(s));
 
-            wait_for_settle(sensors, &watch, interrupt)?;
-
-            // Time at the middle of the sampling window, for the drift term.
-            let t_mid = sweep_start.elapsed().as_secs_f64() + STRESS_SAMPLE_SECS as f64 / 2.0;
-            let temps = sample_temps(sensors, STRESS_SAMPLE_SECS, interrupt)?;
-
-            // Print only target sensors
-            let temp_str: Vec<String> = sensor_names
-                .iter()
-                .zip(temps.iter())
-                .filter(|(name, _)| name.starts_with(target_prefix))
-                .map(|(name, t)| format!("{}={:.1}°C", name, t))
-                .collect();
-            eprintln!("{}", temp_str.join(", "));
-
-            readings.push((pwm, t_mid, temps));
+        let mut line: Vec<String> = hw
+            .sensor_names
+            .iter()
+            .zip(&temps)
+            .filter(|(name, _)| name.starts_with(load))
+            .map(|(name, t)| format!("{}={:.1}°C", name, t))
+            .collect();
+        if let Some(w) = power_w {
+            line.push(format!("{:.0} W", w));
         }
+        eprintln!("{}", line.join(", "));
 
-        // Restore to max cooling before next fan
-        write_pwm_safe(&mut fans[fan_idx], 255)?;
-
-        measurements.push(PhaseMeasurement {
-            fan_name: cf.name.clone(),
-            readings,
+        runs.push(Run {
+            mask,
+            pwms,
+            t,
+            temps,
+            power_w,
         });
     }
 
-    // Stop stress
     stress.stop().context("failed to stop stress workload")?;
-
-    // Brief cooldown
     eprintln!("  Cooling down...");
-    for (fan, &is_ctrl) in fans.iter_mut().zip(controllable.iter()) {
-        if is_ctrl {
-            write_pwm_safe(fan, 255)?;
-        }
-    }
-    interrupt.sleep(Duration::from_secs(10))?;
+    set_units(fans, hw, full)?;
+    hw.interrupt.sleep(Duration::from_secs(10))?;
 
-    Ok(measurements)
+    Ok(PhaseMeasurement {
+        load: load.to_string(),
+        units: hw.units.to_vec(),
+        runs,
+    })
 }
 
-/// Compute thermal coupling from stress benchmark measurements.
+/// Drive each unit, and its group followers, to full speed (bit set) or its
+/// floor PWM. Returns the PWM applied to each unit.
+fn set_units(fans: &mut [Fan], hw: &Hardware, mask: u32) -> Result<Vec<u8>> {
+    let mut applied = Vec::with_capacity(hw.units.len());
+    for (bit, &u) in hw.units.iter().enumerate() {
+        let target = if mask >> bit & 1 == 1 {
+            255
+        } else {
+            hw.classified[u].floor_pwm
+        };
+        let rep = &hw.classified[u].name;
+        for (c, idx) in hw.classified.iter().zip(hw.fan_idx) {
+            let follows = matches!(&c.role, FanRole::CaseFollower { representative } if representative == rep);
+            if let (true, Some(i)) = (follows, idx) {
+                write_pwm_safe(&mut fans[*i], target)?;
+            }
+        }
+        let i = hw.fan_idx[u].expect("sweep units are controllable");
+        applied.push(write_pwm_safe(&mut fans[i], target)?);
+    }
+    Ok(applied)
+}
+
+/// A unit and its group followers.
+fn unit_fans(classified: &[ClassifiedFan], unit: usize) -> Vec<&ClassifiedFan> {
+    let rep = &classified[unit].name;
+    std::iter::once(&classified[unit])
+        .chain(classified.iter().filter(|c| {
+            matches!(&c.role, FanRole::CaseFollower { representative } if representative == rep)
+        }))
+        .collect()
+}
+
+/// `y = corner mean + c·(t - t̄)` fitted to (t, y) samples grouped by corner.
 ///
-/// For each fan×sensor pair, fits `temp = a + b·pwm + c·t` by OLS, where `t`
-/// is elapsed sweep time; the drift term absorbs residual heat soak that the
-/// interleaved sweep order makes separable from the fan effect. A coupling is
-/// kept only when `b` differs from zero at the 95% level. When a pair is
-/// measured in several stress phases, the most precise (smallest standard
-/// error) estimate wins; picking the largest |beta| would select noise.
-/// Negative beta = fan cools that sensor. Positive beta = fan heats it.
-/// Group followers inherit their representative's data.
+/// Pooling raw replicate spread instead would count heat soak between
+/// replicates as noise, widen the tolerance, and wrongly drop fans as
+/// unneeded.
+struct CornerFit {
+    /// Drift-adjusted corner means, at the overall mean time.
+    means: Vec<f64>,
+    sizes: Vec<usize>,
+    /// Mean sample time per corner.
+    times: Vec<f64>,
+    /// Within-corner Σ(t − t̄_corner)², the drift slope's information.
+    stt: f64,
+    /// Residual standard deviation and its degrees of freedom.
+    sd: f64,
+    dof: usize,
+}
+
+impl CornerFit {
+    fn new(groups: &[Vec<(f64, f64)>]) -> Self {
+        let mean = |g: &[(f64, f64)], f: fn(&(f64, f64)) -> f64| {
+            g.iter().map(f).sum::<f64>() / g.len() as f64
+        };
+        let centres: Vec<(f64, f64)> = groups
+            .iter()
+            .map(|g| (mean(g, |p| p.0), mean(g, |p| p.1)))
+            .collect();
+        let (mut sty, mut stt) = (0.0, 0.0);
+        for (g, (tc, yc)) in groups.iter().zip(&centres) {
+            for (t, y) in g {
+                sty += (t - tc) * (y - yc);
+                stt += (t - tc).powi(2);
+            }
+        }
+        let drift = if stt > 1e-12 { sty / stt } else { 0.0 };
+        let n: usize = groups.iter().map(Vec::len).sum();
+        let t_all = groups.iter().flatten().map(|p| p.0).sum::<f64>() / n as f64;
+        let ss: f64 = groups
+            .iter()
+            .zip(&centres)
+            .flat_map(|(g, (tc, yc))| {
+                g.iter()
+                    .map(move |(t, y)| (y - yc - drift * (t - tc)).powi(2))
+            })
+            .sum();
+        let dof = n.saturating_sub(groups.len() + 1);
+        Self {
+            means: centres
+                .iter()
+                .map(|(tc, yc)| yc - drift * (tc - t_all))
+                .collect(),
+            sizes: groups.iter().map(Vec::len).collect(),
+            times: centres.iter().map(|(tc, _)| *tc).collect(),
+            stt,
+            sd: if dof > 0 {
+                (ss / dof as f64).sqrt()
+            } else {
+                f64::INFINITY
+            },
+            dof,
+        }
+    }
+
+    /// 95% tolerance for `means[c] - means[reference]`, at least `floor`.
+    /// Includes the fitted drift's uncertainty, which matters whenever
+    /// adaptive settling leaves corners with unequal mean times.
+    fn tolerance(&self, c: usize, reference: usize, floor: f64) -> f64 {
+        let drift_var = if self.stt > 1e-12 {
+            (self.times[c] - self.times[reference]).powi(2) / self.stt
+        } else {
+            0.0
+        };
+        let se = self.sd
+            * (1.0 / self.sizes[c] as f64 + 1.0 / self.sizes[reference] as f64 + drift_var).sqrt();
+        (t_critical_95(self.dof) * se).max(floor)
+    }
+}
+
+/// Pick the cheapest fan set (fewest physical fans at full speed) that keeps
+/// every target sensor within noise of the all-max temperature and, when a
+/// power meter is available, does not cost measurable power.
+fn select_load_profile(
+    m: &PhaseMeasurement,
+    classified: &[ClassifiedFan],
+    sensor_names: &[String],
+) -> LoadProfile {
+    let corners = 1usize << m.units.len();
+    let full = corners - 1;
+    let group = |value: &dyn Fn(&Run) -> Option<f64>| -> Option<Vec<Vec<(f64, f64)>>> {
+        (0..corners)
+            .map(|c| {
+                m.runs
+                    .iter()
+                    .filter(|r| r.mask as usize == c)
+                    .map(|r| value(r).map(|v| (r.t, v)))
+                    .collect::<Option<Vec<(f64, f64)>>>()
+                    .filter(|v| !v.is_empty())
+            })
+            .collect()
+    };
+
+    let targets: Vec<usize> = (0..sensor_names.len())
+        .filter(|&j| sensor_names[j].starts_with(&m.load))
+        .collect();
+    let temp_fits: Vec<CornerFit> = targets
+        .iter()
+        .filter_map(|&j| group(&|r: &Run| Some(r.temps[j])))
+        .map(|g| CornerFit::new(&g))
+        .collect();
+    let power_fit = group(&|r: &Run| r.power_w).map(|g| CornerFit::new(&g));
+    // A meter that dropped readings must not silently disable the power
+    // check: without complete evidence, keep every unit.
+    let powered = m.runs.iter().filter(|r| r.power_w.is_some()).count();
+    let power_incomplete = powered > 0 && powered < m.runs.len();
+    if power_incomplete {
+        eprintln!(
+            "  {} load: {}/{} runs lack power readings; keeping every fan",
+            m.load,
+            m.runs.len() - powered,
+            m.runs.len()
+        );
+    }
+
+    // Excess temperature over all-max per corner, or None if insufficient.
+    let excess = |c: usize| -> Option<f64> {
+        let mut total = 0.0;
+        for fit in &temp_fits {
+            let rise = fit.means[c] - fit.means[full];
+            if rise > fit.tolerance(c, full, MIN_TEMP_TOLERANCE_C) {
+                return None;
+            }
+            total += rise;
+        }
+        if let Some(fit) = &power_fit {
+            let floor = MIN_POWER_TOLERANCE * fit.means[full];
+            if fit.means[full] - fit.means[c] > fit.tolerance(c, full, floor) {
+                return None;
+            }
+        }
+        Some(total)
+    };
+    let cost = |c: usize| -> u32 {
+        (0..m.units.len())
+            .filter(|bit| c >> bit & 1 == 1)
+            .flat_map(|bit| unit_fans(classified, m.units[bit]))
+            .map(|f| f.fan_count)
+            .sum()
+    };
+
+    let chosen = if temp_fits.len() == targets.len() && !targets.is_empty() && !power_incomplete {
+        (0..corners)
+            .filter_map(|c| excess(c).map(|e| (cost(c), e, c)))
+            .min_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)))
+            .map_or(full, |(_, _, c)| c)
+    } else {
+        full
+    };
+
+    LoadProfile {
+        load: m.load.clone(),
+        sensors: targets.iter().map(|&j| sensor_names[j].clone()).collect(),
+        needed_fans: (0..m.units.len())
+            .filter(|bit| chosen >> bit & 1 == 1)
+            .flat_map(|bit| unit_fans(classified, m.units[bit]))
+            .map(|f| f.name.clone())
+            .collect(),
+    }
+}
+
+/// Fit thermal couplings and per-load fan sets from the factorial runs.
+///
+/// Couplings: per phase and sensor, OLS of `temp = a + Σ b_i·pwm_i + c·t`;
+/// the most precise estimate across phases is kept if significant at 95%.
+/// Negative beta = fan cools that sensor. Group followers inherit their
+/// representative's coupling.
 fn compute_tuning(
     measurements: &[PhaseMeasurement],
     classified: &[ClassifiedFan],
@@ -1014,31 +1186,35 @@ fn compute_tuning(
     let mut best_coupling: std::collections::BTreeMap<(String, String), Estimate> =
         std::collections::BTreeMap::new();
 
-    for measurement in measurements {
-        let x: Vec<Vec<f64>> = measurement
-            .readings
+    for m in measurements {
+        let x: Vec<Vec<f64>> = m
+            .runs
             .iter()
-            .map(|(pwm, t, _)| vec![1.0, *pwm as f64, *t])
+            .map(|r| {
+                std::iter::once(1.0)
+                    .chain(r.pwms.iter().map(|&p| p as f64))
+                    .chain(std::iter::once(r.t))
+                    .collect()
+            })
             .collect();
         for (sensor_idx, sensor_name) in sensor_names.iter().enumerate() {
-            let y: Vec<f64> = measurement
-                .readings
-                .iter()
-                .map(|(_, _, temps)| temps[sensor_idx])
-                .collect();
+            let y: Vec<f64> = m.runs.iter().map(|r| r.temps[sensor_idx]).collect();
             let Some(fit) = ols(&x, &y) else {
                 continue;
             };
-            let se = fit.se[1] * 10.0;
-            if !se.is_finite() {
-                continue;
-            }
-            let key = (measurement.fan_name.clone(), sensor_name.clone());
-            if best_coupling
-                .get(&key)
-                .is_none_or(|(_, prev_se, _, _)| se < *prev_se)
-            {
-                best_coupling.insert(key, (fit.coef[1] * 10.0, se, fit.r_squared, fit.dof));
+            for (bit, &unit) in m.units.iter().enumerate() {
+                let se = fit.se[1 + bit] * 10.0;
+                if !se.is_finite() {
+                    continue;
+                }
+                let key = (classified[unit].name.clone(), sensor_name.clone());
+                if best_coupling
+                    .get(&key)
+                    .is_none_or(|(_, prev_se, _, _)| se < *prev_se)
+                {
+                    best_coupling
+                        .insert(key, (fit.coef[1 + bit] * 10.0, se, fit.r_squared, fit.dof));
+                }
             }
         }
     }
@@ -1077,6 +1253,10 @@ fn compute_tuning(
         step_responses: Vec::new(),
         cross_correlations: Vec::new(),
         thermal_integrals: Vec::new(),
+        load_profiles: measurements
+            .iter()
+            .map(|m| select_load_profile(m, classified, sensor_names))
+            .collect(),
     }
 }
 
@@ -1172,85 +1352,155 @@ fn t_critical_95(dof: usize) -> f64 {
 mod stats_tests {
     use super::*;
 
-    #[test]
-    fn sweep_order_interleaves_and_repeats_reference() {
-        assert_eq!(
-            sweep_order(vec![30, 40, 100, 180, 255]),
-            vec![255, 30, 180, 40, 100, 255]
-        );
+    fn fan(name: &str, role: FanRole, floor_pwm: u8, fan_count: u32) -> ClassifiedFan {
+        ClassifiedFan {
+            name: name.into(),
+            role,
+            floor_pwm,
+            fan_count,
+        }
     }
 
-    #[test]
-    fn drift_is_not_mistaken_for_fan_effect() {
-        let classified = vec![ClassifiedFan {
-            name: "fan".into(),
-            role: FanRole::DirectCooler,
-        }];
-        let names = vec!["cpu".to_string(), "drift_only".to_string()];
-        // True model: cpu cools 0.5 °C per +10 PWM; both sensors heat-soak
-        // at 0.02 °C/s; small deterministic "noise".
-        let noise = [0.05, -0.04, 0.03, -0.05, 0.04, -0.03];
-        let readings = sweep_order(vec![30, 40, 100, 180, 255])
+    /// Simulate a k=2 factorial: unit 0 = CPU cooler, unit 1 = case group.
+    /// `temp(cooler_max, case_max)` and `power(...)` give the true response;
+    /// every sensor also heat-soaks at 0.01 °C/s with small fixed noise.
+    fn simulate(
+        load: &str,
+        temp: impl Fn(bool, bool) -> f64,
+        power: impl Fn(bool, bool) -> f64,
+    ) -> PhaseMeasurement {
+        let noise = [0.1, -0.08, 0.05, -0.1, 0.08, -0.05, 0.1, -0.07];
+        let runs = factorial_order(2)
             .into_iter()
             .enumerate()
-            .map(|(i, pwm)| {
+            .map(|(i, mask)| {
+                let (cooler, case) = (mask & 1 == 1, mask & 2 == 2);
                 let t = 60.0 * i as f64;
-                let soak = 0.02 * t + noise[i];
-                (pwm, t, vec![90.0 - 0.05 * pwm as f64 + soak, 60.0 + soak])
+                let soak = 0.01 * t + noise[i];
+                Run {
+                    mask,
+                    pwms: vec![if cooler { 255 } else { 30 }, if case { 255 } else { 0 }],
+                    t,
+                    temps: vec![temp(cooler, case) + soak, 40.0 + soak],
+                    power_w: Some(power(cooler, case)),
+                }
             })
             .collect();
-        let tuning = compute_tuning(
-            &[PhaseMeasurement {
-                fan_name: "fan".into(),
-                readings,
-            }],
-            &classified,
-            &names,
-        );
+        PhaseMeasurement {
+            load: load.into(),
+            units: vec![0, 1],
+            runs,
+        }
+    }
 
-        assert_eq!(
-            tuning.coupling_matrix.len(),
-            1,
-            "{:?}",
-            tuning.coupling_matrix
-        );
-        let entry = &tuning.coupling_matrix[0];
-        assert_eq!(entry.sensor, "cpu");
-        assert!((entry.beta + 0.5).abs() < 0.05, "beta = {}", entry.beta);
-        assert!(tuning.step_responses.is_empty());
+    fn classified() -> Vec<ClassifiedFan> {
+        vec![
+            fan("cpu_fan", FanRole::DirectCooler, 30, 1),
+            fan("front", FanRole::CaseRepresentative, 0, 2),
+            fan(
+                "top",
+                FanRole::CaseFollower {
+                    representative: "front".into(),
+                },
+                0,
+                1,
+            ),
+        ]
     }
 
     #[test]
-    fn precise_null_phase_overrides_noisy_significant_phase() {
-        let classified = vec![ClassifiedFan {
-            name: "fan".into(),
-            role: FanRole::DirectCooler,
-        }];
-        let names = vec!["board".to_string()];
-        let phase = |slope: f64, noise: [f64; 6]| PhaseMeasurement {
-            fan_name: "fan".into(),
-            readings: sweep_order(vec![30, 40, 100, 180, 255])
-                .into_iter()
-                .enumerate()
-                .map(|(i, pwm)| {
-                    (
-                        pwm,
-                        60.0 * i as f64,
-                        vec![50.0 + slope * pwm as f64 + noise[i]],
-                    )
-                })
-                .collect(),
-        };
-        // Noisy phase: significant cooling on its own. Precise phase: no effect.
-        let noisy = phase(-0.05, [0.4, -0.3, 0.2, -0.4, 0.3, -0.2]);
-        let precise = phase(0.0, [0.01, -0.01, 0.005, -0.01, 0.01, -0.005]);
-        let alone = compute_tuning(std::slice::from_ref(&noisy), &classified, &names);
-        assert_eq!(alone.coupling_matrix.len(), 1);
-        let tuning = compute_tuning(&[noisy, precise], &classified, &names);
+    fn factorial_order_is_gray_and_time_balanced() {
+        let order = factorial_order(3);
+        assert_eq!(order.len(), 16);
+        assert_eq!(order[0], 0b111);
+        for w in order.windows(2) {
+            assert!((w[0] ^ w[1]).count_ones() <= 1, "{:?}", w);
+        }
+        for corner in 0..8u32 {
+            let idx: Vec<usize> = (0..16).filter(|&i| order[i] == corner).collect();
+            assert_eq!(idx.len(), 2);
+            assert_eq!(idx[0] + idx[1], 15, "corner {corner} not time-balanced");
+        }
+    }
+
+    #[test]
+    fn only_the_fans_a_load_needs_are_selected() {
+        let names = vec!["cpu".to_string(), "board".to_string()];
+        // The cooler matters (+8 °C at floor); the case fans add 0.3 °C.
+        let cpu = simulate(
+            "cpu",
+            |cooler, case| 80.0 + if cooler { 0.0 } else { 8.0 } + if case { 0.0 } else { 0.3 },
+            |_, _| 150.0,
+        );
+        let tuning = compute_tuning(&[cpu], &classified(), &names);
+        assert_eq!(tuning.load_profiles[0].needed_fans, vec!["cpu_fan"]);
+        assert_eq!(tuning.load_profiles[0].sensors, vec!["cpu"]);
+        let cooler = tuning
+            .coupling_matrix
+            .iter()
+            .find(|e| e.fan == "cpu_fan" && e.sensor == "cpu")
+            .expect("cooler coupling");
+        assert!(cooler.beta < 0.0);
         assert!(
-            tuning.coupling_matrix.is_empty(),
-            "{:?}",
+            !tuning.coupling_matrix.iter().any(|e| e.sensor == "board"),
+            "pure heat soak must not register as coupling: {:?}",
             tuning.coupling_matrix
         );
+    }
+
+    #[test]
+    fn throttling_counts_even_when_temperature_is_pinned() {
+        let names = vec!["cpu".to_string(), "board".to_string()];
+        // Temperature-limited CPU: Tctl pinned at 90 °C, but with the cooler
+        // at its floor the CPU sheds 20% power to stay there.
+        let cpu = simulate(
+            "cpu",
+            |_, _| 90.0,
+            |cooler, _| if cooler { 200.0 } else { 160.0 },
+        );
+        let tuning = compute_tuning(&[cpu], &classified(), &names);
+        assert_eq!(tuning.load_profiles[0].needed_fans, vec!["cpu_fan"]);
+    }
+
+    #[test]
+    fn groups_select_followers_with_their_representative() {
+        let names = vec!["gpu".to_string(), "board".to_string()];
+        // GPU load: only the case airflow matters.
+        let gpu = simulate(
+            "gpu",
+            |_, case| 70.0 + if case { 0.0 } else { 6.0 },
+            |_, _| 250.0,
+        );
+        let tuning = compute_tuning(&[gpu], &classified(), &names);
+        assert_eq!(tuning.load_profiles[0].needed_fans, vec!["front", "top"]);
+    }
+
+    #[test]
+    fn missing_power_readings_keep_every_fan() {
+        let names = vec!["cpu".to_string(), "board".to_string()];
+        let mut cpu = simulate(
+            "cpu",
+            |_, _| 90.0,
+            |cooler, _| if cooler { 200.0 } else { 160.0 },
+        );
+        cpu.runs[3].power_w = None;
+        let tuning = compute_tuning(&[cpu], &classified(), &names);
+        assert_eq!(
+            tuning.load_profiles[0].needed_fans,
+            vec!["cpu_fan", "front", "top"]
+        );
+    }
+
+    #[test]
+    fn contrast_tolerance_includes_drift_uncertainty() {
+        // Corner 0 sampled late, corner 1 early: unequal mean times.
+        let groups = vec![
+            vec![(100.0, 50.3), (400.0, 53.1)],
+            vec![(0.0, 49.8), (150.0, 51.6)],
+        ];
+        let fit = CornerFit::new(&groups);
+        let naive = t_critical_95(fit.dof) * fit.sd * (0.5f64 + 0.5).sqrt();
+        assert!(fit.dof == 1 && fit.sd.is_finite());
+        assert!(fit.tolerance(0, 1, 0.0) > naive * 1.01);
     }
 }

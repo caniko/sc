@@ -14,6 +14,15 @@ pub struct OptimizedConfig {
     pub has_tuning_data: bool,
 }
 
+/// PWM a generated curve commands at its bottom: direct coolers keep
+/// spinning, case fans may stop.
+pub fn floor_pwm(position: &FanPosition) -> u8 {
+    match position {
+        FanPosition::CpuCooler | FanPosition::GpuCooler => 30,
+        _ => 0,
+    }
+}
+
 /// Default thermal profiles per sensor type.
 /// (t_fanon, t_target, t_throttle)
 fn sensor_thermal_profile(sensor_name: &str) -> (f64, f64, f64) {
@@ -44,13 +53,18 @@ fn sensor_thermal_profile(sensor_name: &str) -> (f64, f64, f64) {
 /// 1. Reassign sensors to fans based on measured coupling strength
 /// 2. Compute curve shape exponent (gamma) from effectiveness
 /// 3. Generate urgency-normalized curves calibrated to thermal profiles
+///
+/// With benchmark load profiles, a fan is linked only to the heat sources
+/// whose minimal fan set contains it, so e.g. a GPU-only case fan stays at
+/// its floor under CPU load. A fan no load needs gets a reserve curve: it
+/// holds its floor until the sensor passes its target temperature.
 pub fn optimize_config(
     config: &Config,
     tuning: Option<&TuningResponse>,
     coupling_threshold: f64,
 ) -> OptimizedConfig {
     let tuning = match tuning {
-        Some(t) if !t.coupling_matrix.is_empty() => t,
+        Some(t) if !t.coupling_matrix.is_empty() || !t.load_profiles.is_empty() => t,
         _ => {
             // No tuning data — return original curves unchanged
             return OptimizedConfig {
@@ -94,10 +108,37 @@ pub fn optimize_config(
             coupled_sensors.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap());
 
             // Fall back to original sensors if no coupling data for this fan
-            let sensors = if coupled_sensors.is_empty() {
+            let coupled_or_original: Vec<String> = if coupled_sensors.is_empty() {
                 fan_config.sensors.clone()
             } else {
                 coupled_sensors.iter().map(|(s, _, _)| s.clone()).collect()
+            };
+
+            // Sensors of every load whose minimal fan set includes this fan,
+            // strongest coupling first.
+            let mut needed_sensors: Vec<String> = Vec::new();
+            for profile in &tuning.load_profiles {
+                if profile.needed_fans.contains(&fan_config.name) {
+                    for s in &profile.sensors {
+                        if !needed_sensors.contains(s) {
+                            needed_sensors.push(s.clone());
+                        }
+                    }
+                }
+            }
+            let rank = |s: &String| {
+                coupled_sensors
+                    .iter()
+                    .position(|(c, _, _)| c == s)
+                    .unwrap_or(usize::MAX)
+            };
+            needed_sensors.sort_by_key(rank);
+
+            let reserve = !tuning.load_profiles.is_empty() && needed_sensors.is_empty();
+            let sensors = if needed_sensors.is_empty() {
+                coupled_or_original
+            } else {
+                needed_sensors
             };
 
             let max_beta = coupled_sensors
@@ -111,8 +152,13 @@ pub fn optimize_config(
             // Determine the most important sensor for curve temperature range
             let primary_sensor = sensors.first().cloned().unwrap_or_default();
 
-            // Generate urgency-based curve
-            let curve = generate_urgency_curve(fan_config, &primary_sensor, gamma);
+            // ponytail: one curve per fan, profiled on the primary sensor; a fan
+            // needed by both CPU and GPU uses the stronger-coupled one's range.
+            let curve = if reserve {
+                generate_reserve_curve(fan_config, &primary_sensor)
+            } else {
+                generate_urgency_curve(fan_config, &primary_sensor, gamma)
+            };
 
             OptimizedFan {
                 name: fan_config.name.clone(),
@@ -163,11 +209,7 @@ fn generate_urgency_curve(
 ) -> Vec<CurvePoint> {
     let (t_fanon, _t_target, t_throttle) = sensor_thermal_profile(primary_sensor);
 
-    // Determine minimum PWM based on fan position
-    let pwm_min: f64 = match fan_config.topology.position {
-        FanPosition::CpuCooler | FanPosition::GpuCooler => 30.0,
-        _ => 0.0,
-    };
+    let pwm_min = floor_pwm(&fan_config.topology.position) as f64;
 
     // Non-uniform urgency levels: more resolution in the 0.3-0.8 range
     let urgency_levels: &[f64] = &[0.0, 0.15, 0.35, 0.55, 0.75, 0.90, 1.0];
@@ -184,6 +226,26 @@ fn generate_urgency_curve(
             }
         })
         .collect()
+}
+
+/// Curve for a fan no load needs: floor PWM until the sensor's target
+/// temperature, then a linear ramp to full speed at its throttle point.
+fn generate_reserve_curve(
+    fan_config: &sc_core::config::FanConfig,
+    primary_sensor: &str,
+) -> Vec<CurvePoint> {
+    let (_, t_target, t_throttle) = sensor_thermal_profile(primary_sensor);
+    let floor = floor_pwm(&fan_config.topology.position);
+    vec![
+        CurvePoint {
+            temp: t_target.round() as u32,
+            pwm: floor,
+        },
+        CurvePoint {
+            temp: t_throttle.round() as u32,
+            pwm: 255,
+        },
+    ]
 }
 
 #[cfg(test)]
@@ -345,5 +407,59 @@ mod tests {
         assert!(!result.has_tuning_data);
         assert_eq!(result.fans[0].curve[0].pwm, 30);
         assert_eq!(result.fans[0].curve[1].pwm, 200);
+    }
+
+    #[test]
+    fn load_profiles_link_only_needed_fans() {
+        let case_fan = |name: &str| sc_core::config::FanConfig {
+            name: name.into(),
+            hwmon: "nct6799".into(),
+            pwm_index: 1,
+            hwmon_instance: None,
+            topology: test_topology(),
+            sensors: vec!["cpu".into(), "gpu_edge".into()],
+            curve: vec![],
+        };
+        let mut config = sc_core::config::Config {
+            poll_interval_ms: 2000,
+            derivative: sc_core::config::DerivativeConfig {
+                window_size: 10,
+                boost_threshold: 2.0,
+                decay_rate: 0.5,
+            },
+            sensors: vec![],
+            fans: vec![case_fan("front"), case_fan("rear")],
+            nvidia: vec![],
+            tuning: Default::default(),
+        };
+        config.fans[0].sensors = vec!["cpu".into()];
+        let tuning = TuningResponse {
+            coupling_matrix: vec![],
+            step_responses: vec![],
+            cross_correlations: vec![],
+            thermal_integrals: vec![],
+            load_profiles: vec![
+                sc_core::ipc::LoadProfile {
+                    load: "cpu".into(),
+                    sensors: vec!["cpu".into()],
+                    needed_fans: vec![],
+                },
+                sc_core::ipc::LoadProfile {
+                    load: "gpu".into(),
+                    sensors: vec!["gpu_edge".into(), "gpu_junction".into()],
+                    needed_fans: vec!["rear".into()],
+                },
+            ],
+        };
+
+        let result = optimize_config(&config, Some(&tuning), 0.1);
+        assert!(result.has_tuning_data);
+        // `front` is needed by no load: reserve curve on its own sensors.
+        assert_eq!(result.fans[0].sensors, vec!["cpu"]);
+        assert_eq!(result.fans[0].curve[0].pwm, 0);
+        assert_eq!(result.fans[0].curve[0].temp, 80);
+        // `rear` follows the GPU only, with a full urgency curve.
+        assert_eq!(result.fans[1].sensors, vec!["gpu_edge", "gpu_junction"]);
+        assert_eq!(result.fans[1].curve.len(), 7);
     }
 }

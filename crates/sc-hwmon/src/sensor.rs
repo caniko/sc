@@ -72,6 +72,11 @@ impl Sensor {
         })
     }
 
+    /// The hwmon directory this sensor belongs to.
+    pub fn hwmon_dir(&self) -> Option<&std::path::Path> {
+        self.input_path.parent()
+    }
+
     /// Read the current temperature in degrees Celsius.
     pub fn read_temp_c(&self) -> Result<f64> {
         let millidegrees: i64 = read_sysfs(&self.input_path)?;

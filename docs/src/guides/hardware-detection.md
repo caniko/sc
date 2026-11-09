@@ -62,6 +62,18 @@ Benchmark writes are guarded by the same transaction-safe restoration path and
 the generated Nix module is only produced after an applied benchmark has
 collected tuning data.
 
+Under CPU and then GPU stress, the benchmark runs every combination of sweep
+units at full speed or at their floor (30 PWM for coolers, 0 for case fans),
+twice: once in Gray-code order and once reversed. Each direct cooler is a
+unit, and so is each case-fan `group`; at most four units are allowed. The
+two passes cancel linear heat soak. For each load it records the cheapest
+fan set (fewest physical fans at full speed) that keeps every target sensor
+within noise, or at least 1 °C, of the all-max temperature. It also checks
+CPU package power (RAPL, needs root) or GPU board power stays within 3%, so
+throttling is not mistaken for headroom. `--generate-nix` then links each fan
+only to the loads that need it. A fan that no load needs gets a reserve
+curve, which holds its floor until the sensor passes its target temperature.
+
 The detector classifies known CPU chips such as `k10temp`, `coretemp`, and `zenpower`; GPU chips such as `amdgpu`, `nvidia`, and `nouveau`; and common motherboard EC prefixes such as `nct6`, `it8`, `w83`, `f71`, and `asus`.
 
 When multiple hwmon chips share the same name, generated configuration can include `hwmon_instance` to select a specific sysfs instance.

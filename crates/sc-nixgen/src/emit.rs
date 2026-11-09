@@ -34,6 +34,17 @@ fn emit_nix_inner(
             "# Coupling entries: {}, avg R² = {:.3}\n",
             n_coupling, avg_r2
         ));
+        for p in &t.load_profiles {
+            out.push_str(&format!(
+                "# {} load needs: {}\n",
+                p.load,
+                if p.needed_fans.is_empty() {
+                    "no fans above their floor".to_string()
+                } else {
+                    p.needed_fans.join(", ")
+                }
+            ));
+        }
         if !t.step_responses.is_empty() {
             let total_events: usize = t.step_responses.iter().map(|s| s.n_events).sum();
             out.push_str(&format!("# Step response events: {}\n", total_events));

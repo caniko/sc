@@ -63,6 +63,21 @@ pub struct TuningResponse {
     pub step_responses: Vec<StepResponseEntry>,
     pub cross_correlations: Vec<CorrelationEntry>,
     pub thermal_integrals: Vec<IntegralEntry>,
+    /// Minimal fan sets per heat source, measured by `sc-nixgen benchmark`.
+    #[serde(default)]
+    pub load_profiles: Vec<LoadProfile>,
+}
+
+/// The cheapest fan set that keeps one heat source as cool, and as
+/// unthrottled, as running every fan at full speed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoadProfile {
+    /// Heat source: "cpu" or "gpu".
+    pub load: String,
+    /// Sensors that represent this heat source.
+    pub sensors: Vec<String>,
+    /// Fans that must ramp for this load; the rest can stay at their floor.
+    pub needed_fans: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
