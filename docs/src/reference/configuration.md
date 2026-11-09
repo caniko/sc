@@ -11,7 +11,7 @@ Top-level fields:
 - `sensors`: temperature sensor definitions. At least one is required unless only `nvidia` is configured.
 - `fans`: PWM fan definitions. At least one is required unless only `nvidia` is configured.
 - `nvidia`: optional list of NVIDIA GPUs driven through NVML (see below).
-- `tuning`: optional advanced tuning settings. Defaults are applied when omitted.
+- `tuning`: accepted for compatibility with older configurations and ignored.
 - `hysteresis`: optional degrees C (default `0`). A falling sensor reading must drop more than this below its held value before the fan curves follow it down; rises apply at once. `sc-nixgen` writes `3` into generated configs.
 
 `derivative` fields:
@@ -52,16 +52,7 @@ Curve validation requires:
 
 If any sensor linked to a fan is unavailable or outside `0<temp<=150C`, the daemon commands that fan to PWM `255` until every linked sensor is valid again. Sensors on a runtime-suspended GPU are skipped instead; a fan whose linked sensors are all suspended idles at its curve floor.
 
-Tuning defaults:
-
-- `ewma_span = 20`
-- `ccf_buffer_size = 120`
-- `ccf_max_lag = 30`
-- `step_threshold = 15`
-- `response_window = 60`
-- `regression_min_samples = 60`
-
-All tuning sizes must be nonzero, `response_window` must be at least `5`, and `ccf_buffer_size` must be at least `ccf_max_lag + 10`.
+The daemon no longer estimates fan/sensor coupling online: PWM and temperature are coupled by the control loop, so those estimates were structurally biased. Use `sc-nixgen benchmark` to measure coupling with an open-loop benchmark.
 
 ## NVIDIA fans
 

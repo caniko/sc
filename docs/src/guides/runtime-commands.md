@@ -26,17 +26,13 @@ Query current sensor and fan state:
 sc status
 ```
 
-Show cooling effectiveness analytics:
-
-```sh
-sc analytics
-```
-
-Show advanced thermal tuning data:
+Show thermal integral data:
 
 ```sh
 sc tuning
 ```
+
+Fan/sensor coupling is measured by `sc-nixgen benchmark`; the daemon no longer reports closed-loop online estimates.
 
 The query commands connect to `/run/smartcool/sc.sock`. If the daemon is not running or the socket is unavailable, the IPC client reports that it failed to connect to the SmartCool daemon.
 
@@ -112,4 +108,4 @@ Suggest a curve for the healthy fans. Start your own GPU load first (NVIDIA load
 sc-nixgen benchmark-nvidia --device 0000:01:00.0 --disabled-fan 1 --target-c 75 --apply
 ```
 
-These are persistent `asusd` firmware curves. They are separate from `sc daemon`, which continuously reads hwmon temperatures and writes live hwmon PWM values using SmartCool's derivative tracking and analytics.
+These are persistent `asusd` firmware curves. They are separate from `sc daemon`, which continuously reads hwmon temperatures and writes live hwmon PWM values using SmartCool's derivative tracking and thermal integrals.

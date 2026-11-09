@@ -2,7 +2,7 @@
 name = "smartcool"
 version.workspace = true
 edition.workspace = true
-description = "Intelligent fan control daemon with derivative tracking and cooling analytics"
+description = "Intelligent fan control daemon with derivative tracking and thermal integral tracking"
 publish = false
 
 [[bin]]

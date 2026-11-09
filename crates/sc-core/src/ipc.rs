@@ -8,14 +8,12 @@ pub const SOCKET_PATH: &str = "/run/smartcool/sc.sock";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
     Status,
-    Analytics,
     Tuning,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
     Status(StatusResponse),
-    Analytics(AnalyticsResponse),
     Tuning(TuningResponse),
     Error(String),
 }
@@ -40,21 +38,6 @@ pub struct FanStatus {
     pub rpm: u32,
     pub base_pwm: u8,
     pub boost_applied: i16,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnalyticsResponse {
-    pub fans: Vec<FanAnalyticsReport>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FanAnalyticsReport {
-    pub name: String,
-    pub pwm: u8,
-    pub rpm: u32,
-    pub history_samples: usize,
-    /// Per-sensor effectiveness: (sensor_name, °C change per +10 PWM)
-    pub effectiveness: Vec<(String, f64)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

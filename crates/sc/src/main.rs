@@ -26,9 +26,7 @@ enum Command {
     },
     /// Query current sensor and fan status
     Status,
-    /// Show cooling effectiveness analytics
-    Analytics,
-    /// Show advanced thermal tuning data (coupling matrix, step responses, CCF)
+    /// Show thermal integral data
     Tuning,
     /// Validate a configuration file
     Config {
@@ -58,11 +56,6 @@ fn main() -> Result<()> {
         Command::Status => {
             let response = sc_core::ipc::query(sc_core::ipc::Request::Status)?;
             display::print_status(&response);
-            Ok(())
-        }
-        Command::Analytics => {
-            let response = sc_core::ipc::query(sc_core::ipc::Request::Analytics)?;
-            display::print_analytics(&response);
             Ok(())
         }
         Command::Tuning => {

@@ -52,7 +52,7 @@ fn emit_nix_inner(
     }
     if !optimized.has_tuning_data {
         out.push_str("# WARNING: No tuning data available, using original curves unchanged\n");
-        out.push_str("# Run the daemon and collect data, then re-run sc-nixgen\n");
+        out.push_str("# Run `sc-nixgen benchmark --apply` to measure coupling, then re-run sc-nixgen\n");
     }
 
     // Detect unique hwmon chips for kernel modules
@@ -176,14 +176,7 @@ fn build_settings(config: &Config, optimized: &OptimizedConfig) -> Settings {
             })
             .collect(),
         hysteresis: optimized.hysteresis,
-        tuning: Tuning {
-            ewma_span: config.tuning.ewma_span,
-            ccf_buffer_size: config.tuning.ccf_buffer_size,
-            ccf_max_lag: config.tuning.ccf_max_lag,
-            step_threshold: config.tuning.step_threshold,
-            response_window: config.tuning.response_window,
-            regression_min_samples: config.tuning.regression_min_samples,
-        },
+        tuning: config.tuning.clone(),
     }
 }
 
@@ -294,7 +287,7 @@ struct Settings {
     sensors: Vec<Sensor>,
     fans: Vec<Fan>,
     hysteresis: u32,
-    tuning: Tuning,
+    tuning: sc_core::config::TuningConfig,
 }
 
 #[derive(serde::Serialize)]
@@ -331,16 +324,6 @@ struct Fan {
 struct CurvePointOut {
     temp: u32,
     pwm: u8,
-}
-
-#[derive(serde::Serialize)]
-struct Tuning {
-    ewma_span: usize,
-    ccf_buffer_size: usize,
-    ccf_max_lag: usize,
-    step_threshold: u8,
-    response_window: usize,
-    regression_min_samples: usize,
 }
 
 #[cfg(test)]

@@ -5,11 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::thermal::{
-    analytics::AnalyticsTracker,
-    derivative::DerivativeTracker,
-    tuning::{ThermalSystem, TuningParams},
-};
+use crate::thermal::{derivative::DerivativeTracker, tuning::ThermalSystem};
 use sc_core::config::Config;
 use sc_core::ipc;
 use sc_hwmon::{
@@ -17,16 +13,10 @@ use sc_hwmon::{
     sensor::Sensor,
 };
 
-/// Number of analytics history snapshots to retain per fan.
-const ANALYTICS_HISTORY_SIZE: usize = 300;
-/// Recompute analytics every N ticks.
-const ANALYTICS_RECOMPUTE_INTERVAL: u32 = 30;
-
 /// Resolved runtime state for a single managed fan.
 struct ManagedFan {
     config_idx: usize,
     derivative_boost: f64,
-    analytics: AnalyticsTracker,
 }
 
 pub fn run_daemon(config_path: &Path) -> Result<()> {
@@ -102,24 +92,14 @@ pub fn run_daemon(config_path: &Path) -> Result<()> {
         managed_fans.push(ManagedFan {
             config_idx: i,
             derivative_boost: 0.0,
-            analytics: AnalyticsTracker::new(&fc.name, ANALYTICS_HISTORY_SIZE),
         });
     }
 
-    // Initialize thermal tuning system
-    let fan_names: Vec<String> = config.fans.iter().map(|f| f.name.clone()).collect();
+    // Initialize thermal integral tracking
     let sensor_names: Vec<String> = config.sensors.iter().map(|s| s.name.clone()).collect();
-    let tuning_params = TuningParams {
-        ewma_span: config.tuning.ewma_span,
-        ccf_buffer_size: config.tuning.ccf_buffer_size,
-        ccf_max_lag: config.tuning.ccf_max_lag,
-        step_threshold: config.tuning.step_threshold,
-        response_window: config.tuning.response_window,
-        regression_min_samples: config.tuning.regression_min_samples,
-        poll_interval_secs: config.poll_interval_ms as f64 / 1000.0,
-    };
-    let mut thermal_system = ThermalSystem::new(&tuning_params, &fan_names, &sensor_names);
-    tracing::info!("initialized thermal tuning system");
+    let mut thermal_system =
+        ThermalSystem::new(config.poll_interval_ms as f64 / 1000.0, &sensor_names);
+    tracing::info!("initialized thermal integral tracking");
 
     // Set up shared state for IPC
     let shared_state = Arc::new(Mutex::new(crate::ipc_server::DaemonState {
@@ -127,7 +107,6 @@ pub fn run_daemon(config_path: &Path) -> Result<()> {
             sensors: Vec::new(),
             fans: Vec::new(),
         },
-        analytics: ipc::AnalyticsResponse { fans: Vec::new() },
         tuning: ipc::TuningResponse {
             coupling_matrix: Vec::new(),
             step_responses: Vec::new(),
@@ -146,7 +125,6 @@ pub fn run_daemon(config_path: &Path) -> Result<()> {
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown))?;
 
     let poll_interval = Duration::from_millis(config.poll_interval_ms);
-    let mut tick: u32 = 0;
     let mut ready = false;
 
     // Main control loop
@@ -163,7 +141,6 @@ pub fn run_daemon(config_path: &Path) -> Result<()> {
             &mut managed_fans,
             &mut thermal_system,
             &shared_state,
-            tick,
         )
         .context("control tick failed")?;
 
@@ -181,8 +158,6 @@ pub fn run_daemon(config_path: &Path) -> Result<()> {
                 "daemon ready"
             );
         }
-
-        tick = tick.wrapping_add(1);
 
         let elapsed = tick_start.elapsed();
         if elapsed < poll_interval {
@@ -220,7 +195,6 @@ fn control_tick(
     managed_fans: &mut [ManagedFan],
     thermal_system: &mut ThermalSystem,
     shared_state: &Arc<Mutex<crate::ipc_server::DaemonState>>,
-    tick: u32,
 ) -> Result<()> {
     anyhow::ensure!(
         fans.len() == managed_fans.len(),
@@ -303,17 +277,6 @@ fn control_tick(
 
         let rpm = fan.read_rpm().unwrap_or(0);
 
-        let linked_temps: HashMap<String, f64> = fan_config
-            .sensors
-            .iter()
-            .filter_map(|s| sensor_temps.get(s).map(|&t| (s.clone(), t)))
-            .collect();
-        mf.analytics.record(target_pwm, linked_temps);
-
-        if tick.is_multiple_of(ANALYTICS_RECOMPUTE_INTERVAL) {
-            mf.analytics.recompute();
-        }
-
         status_fans.push(ipc::FanStatus {
             name: fan.name.clone(),
             pwm: actual_pwm,
@@ -323,12 +286,8 @@ fn control_tick(
         });
     }
 
-    // Update thermal tuning system
-    let fan_pwms: HashMap<String, u8> = status_fans
-        .iter()
-        .map(|f| (f.name.clone(), f.pwm))
-        .collect();
-    thermal_system.update(&sensor_temps, &fan_pwms);
+    // Update thermal integral tracking
+    thermal_system.update(&sensor_temps);
 
     // Build IPC state
     let status_sensors: Vec<ipc::SensorStatus> = sensors
@@ -340,59 +299,10 @@ fn control_tick(
         })
         .collect();
 
-    let analytics_fans: Vec<ipc::FanAnalyticsReport> = fans
-        .iter()
-        .zip(managed_fans.iter())
-        .map(|(fan, mf)| {
-            let rpm = fan.read_rpm().unwrap_or(0);
-            let pwm = fan.read_pwm().unwrap_or(0);
-            ipc::FanAnalyticsReport {
-                name: mf.analytics.name().to_string(),
-                pwm,
-                rpm,
-                history_samples: mf.analytics.history_len(),
-                effectiveness: mf
-                    .analytics
-                    .effectiveness()
-                    .iter()
-                    .map(|(k, v)| (k.clone(), *v))
-                    .collect(),
-            }
-        })
-        .collect();
-
     let tuning_response = ipc::TuningResponse {
-        coupling_matrix: thermal_system
-            .coupling_matrix()
-            .into_iter()
-            .map(|c| ipc::CouplingEntry {
-                fan: c.fan,
-                sensor: c.sensor,
-                beta: c.beta,
-                r_squared: c.r_squared,
-            })
-            .collect(),
-        step_responses: thermal_system
-            .step_responses()
-            .into_iter()
-            .map(|s| ipc::StepResponseEntry {
-                fan: s.fan,
-                sensor: s.sensor,
-                gain_k: s.gain_k,
-                tau_ticks: s.tau_ticks,
-                n_events: s.n_events,
-            })
-            .collect(),
-        cross_correlations: thermal_system
-            .cross_correlations()
-            .into_iter()
-            .map(|c| ipc::CorrelationEntry {
-                fan: c.fan,
-                sensor: c.sensor,
-                peak_ccf: c.peak_ccf,
-                optimal_lag: c.optimal_lag,
-            })
-            .collect(),
+        coupling_matrix: Vec::new(),
+        step_responses: Vec::new(),
+        cross_correlations: Vec::new(),
         thermal_integrals: thermal_system
             .thermal_integrals()
             .into_iter()
@@ -409,9 +319,6 @@ fn control_tick(
         state.status = ipc::StatusResponse {
             sensors: status_sensors,
             fans: status_fans,
-        };
-        state.analytics = ipc::AnalyticsResponse {
-            fans: analytics_fans,
         };
         state.tuning = tuning_response;
     }

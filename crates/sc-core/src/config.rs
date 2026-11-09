@@ -22,59 +22,11 @@ pub struct Config {
     pub hysteresis: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TuningConfig {
-    /// EWMA smoothing span (samples). Higher = smoother, more lag.
-    #[serde(default = "default_ewma_span")]
-    pub ewma_span: usize,
-    /// Cross-correlation circular buffer size (samples).
-    #[serde(default = "default_ccf_buffer_size")]
-    pub ccf_buffer_size: usize,
-    /// Maximum lag to search in CCF (samples).
-    #[serde(default = "default_ccf_max_lag")]
-    pub ccf_max_lag: usize,
-    /// Minimum PWM change to trigger step response detection.
-    #[serde(default = "default_step_threshold")]
-    pub step_threshold: u8,
-    /// Ticks to record after a step event for exponential fitting.
-    #[serde(default = "default_response_window")]
-    pub response_window: usize,
-    /// Minimum samples before solving OLS regression.
-    #[serde(default = "default_regression_min_samples")]
-    pub regression_min_samples: usize,
-}
-
-impl Default for TuningConfig {
-    fn default() -> Self {
-        Self {
-            ewma_span: default_ewma_span(),
-            ccf_buffer_size: default_ccf_buffer_size(),
-            ccf_max_lag: default_ccf_max_lag(),
-            step_threshold: default_step_threshold(),
-            response_window: default_response_window(),
-            regression_min_samples: default_regression_min_samples(),
-        }
-    }
-}
-
-fn default_ewma_span() -> usize {
-    20
-}
-fn default_ccf_buffer_size() -> usize {
-    120
-}
-fn default_ccf_max_lag() -> usize {
-    30
-}
-fn default_step_threshold() -> u8 {
-    15
-}
-fn default_response_window() -> usize {
-    60
-}
-fn default_regression_min_samples() -> usize {
-    60
-}
+/// Legacy tuning section. The daemon no longer runs closed-loop estimators, so
+/// no tuning knobs remain; the empty struct keeps old configurations loading
+/// because serde ignores the removed keys.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TuningConfig {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DerivativeConfig {
@@ -271,32 +223,6 @@ fn validate(config: &Config) -> Result<()> {
     anyhow::ensure!(
         config.derivative.decay_rate.is_finite() && config.derivative.decay_rate >= 0.0,
         "derivative decay_rate must be finite and >= 0"
-    );
-    anyhow::ensure!(config.tuning.ewma_span > 0, "tuning ewma_span must be > 0");
-    anyhow::ensure!(
-        config.tuning.ccf_buffer_size > 0,
-        "tuning ccf_buffer_size must be > 0"
-    );
-    let minimum_ccf_buffer = config
-        .tuning
-        .ccf_max_lag
-        .checked_add(10)
-        .ok_or_else(|| anyhow::anyhow!("tuning ccf_max_lag is too large"))?;
-    anyhow::ensure!(
-        config.tuning.ccf_buffer_size >= minimum_ccf_buffer,
-        "tuning ccf_buffer_size must be at least ccf_max_lag + 10"
-    );
-    anyhow::ensure!(
-        config.tuning.step_threshold > 0,
-        "tuning step_threshold must be > 0"
-    );
-    anyhow::ensure!(
-        config.tuning.response_window >= 5,
-        "tuning response_window must be >= 5"
-    );
-    anyhow::ensure!(
-        config.tuning.regression_min_samples > 0,
-        "tuning regression_min_samples must be > 0"
     );
 
     let mut sensor_names = HashSet::new();
@@ -505,28 +431,56 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_unsafe_tuning_values() {
-        let mut config = test_config();
-        config.tuning.ccf_buffer_size = 0;
-        assert!(validate(&config)
-            .unwrap_err()
-            .to_string()
-            .contains("ccf_buffer_size"));
+    fn legacy_tuning_keys_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy-tuning.pkl");
+        std::fs::write(
+            &path,
+            r#"
+poll_interval_ms = 2000
+derivative = new {
+  window_size = 10
+  boost_threshold = 2.0
+  decay_rate = 0.5
+}
+tuning = new {
+  ewma_span = 20
+  ccf_buffer_size = 120
+  ccf_max_lag = 30
+  step_threshold = 15
+  response_window = 60
+  regression_min_samples = 60
+}
+sensors = new Listing {
+  new {
+    name = "cpu"
+    hwmon = "k10temp"
+    index = 1
+  }
+}
+fans = new Listing {
+  new {
+    name = "test"
+    hwmon = "nct6799"
+    pwm_index = 1
+    topology = new {
+      position = "cpu_cooler"
+      direction = "exhaust"
+    }
+    sensors = new Listing { "cpu" }
+    curve = new Listing {
+      new { temp = 45; pwm = 20 }
+      new { temp = 85; pwm = 200 }
+    }
+  }
+}
+"#,
+        )
+        .unwrap();
 
-        let mut config = test_config();
-        config.tuning.ccf_buffer_size = 20;
-        config.tuning.ccf_max_lag = 11;
-        assert!(validate(&config)
-            .unwrap_err()
-            .to_string()
-            .contains("ccf_max_lag + 10"));
-
-        let mut config = test_config();
-        config.tuning.response_window = 0;
-        assert!(validate(&config)
-            .unwrap_err()
-            .to_string()
-            .contains("response_window"));
+        let config = load(&path).unwrap();
+        assert_eq!(config.sensors.len(), 1);
+        assert_eq!(config.fans.len(), 1);
     }
 
     #[test]

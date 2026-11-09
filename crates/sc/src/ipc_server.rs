@@ -4,14 +4,11 @@ use std::os::unix::net::UnixListener;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use sc_core::ipc::{
-    AnalyticsResponse, Request, Response, StatusResponse, TuningResponse, SOCKET_PATH,
-};
+use sc_core::ipc::{Request, Response, StatusResponse, TuningResponse, SOCKET_PATH};
 
 /// Shared daemon state that the IPC server can read.
 pub struct DaemonState {
     pub status: StatusResponse,
-    pub analytics: AnalyticsResponse,
     pub tuning: TuningResponse,
 }
 
@@ -63,9 +60,6 @@ fn handle_connection(
             Request::Status => Response::Status(StatusResponse {
                 sensors: state.status.sensors.clone(),
                 fans: state.status.fans.clone(),
-            }),
-            Request::Analytics => Response::Analytics(AnalyticsResponse {
-                fans: state.analytics.fans.clone(),
             }),
             Request::Tuning => Response::Tuning(state.tuning.clone()),
         };

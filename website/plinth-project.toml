@@ -1,6 +1,6 @@
 [site]
 title = "SmartCool"
-description = "Intelligent fan control daemon with derivative tracking and cooling analytics."
+description = "Intelligent fan control daemon with derivative tracking and thermal integral tracking."
 base_url = "/sc/"
 footer_note = "SmartCool is maintained from its Codeberg source repository."
 
@@ -31,13 +31,13 @@ href = "https://github.com/caniko/sc"
 [[pages]]
 slug = "index"
 title = "SmartCool"
-description = "Intelligent fan control daemon with derivative tracking and cooling analytics."
+description = "Intelligent fan control daemon with derivative tracking and thermal integral tracking."
 
 [[pages.sections]]
 type = "hero"
 title = "SmartCool"
 tagline = "NixOS-oriented fan control for hwmon systems."
-subtitle = "SmartCool runs a Linux fan control daemon, reads configured hwmon sensors, drives PWM fan curves, adds derivative-based thermal boosts, and reports status, analytics, and tuning data over a local Unix socket."
+subtitle = "SmartCool runs a Linux fan control daemon, reads configured hwmon sensors, drives PWM fan curves, adds derivative-based thermal boosts, and reports status and thermal integral data over a local Unix socket."
 
 [[pages.sections.ctas]]
 label = "Read the docs"
@@ -54,7 +54,7 @@ id = "overview"
 
 [[pages.sections.features]]
 title = "Daemon and CLI"
-description = "The sc binary runs the SmartCool daemon, validates Pkl configuration, and queries status, analytics, and tuning data from /run/smartcool/sc.sock."
+description = "The sc binary runs the SmartCool daemon, validates Pkl configuration, and queries status and thermal integral data from /run/smartcool/sc.sock."
 highlight = true
 
 [[pages.sections.features]]
@@ -70,8 +70,8 @@ title = "Thermal behavior"
 description = "Fan targets combine configured temperature curves with derivative-based boost and decay behavior for rising or falling temperatures."
 
 [[pages.sections.features]]
-title = "Cooling analytics"
-description = "The daemon records fan PWM, RPM, sensor temperatures, effectiveness estimates, coupling data, step responses, cross-correlations, and thermal integrals."
+title = "Thermal integrals"
+description = "The daemon records fan PWM, RPM, sensor temperatures, and cumulative thermal integrals."
 
 [[pages.sections.features]]
 title = "Reproducible outputs"

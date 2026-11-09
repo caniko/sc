@@ -18,7 +18,6 @@ After enabling the generated NixOS module configuration and rebuilding the host,
 
 ```sh
 sc status
-sc analytics
 sc tuning
 ```
 

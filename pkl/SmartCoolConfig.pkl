@@ -4,13 +4,9 @@ class DerivativeConfig {
   decay_rate: Number
 }
 
+/// Retained for backwards compatibility; the daemon no longer exposes any
+/// closed-loop tuning knobs.
 class TuningConfig {
-  ewma_span: UInt = 20
-  ccf_buffer_size: UInt = 120
-  ccf_max_lag: UInt = 30
-  step_threshold: UInt = 15
-  response_window: UInt = 60
-  regression_min_samples: UInt = 60
 }
 
 class SensorConfig {
