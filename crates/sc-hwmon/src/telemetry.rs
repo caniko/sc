@@ -54,10 +54,7 @@ pub fn read_snapshot(base: &Path) -> Result<Snapshot> {
         let Some(chip) = text(&path.join("name")) else {
             continue;
         };
-        let blocked = if matches!(
-            chip.as_str(),
-            "amdgpu" | "nvidia" | "nouveau" | "i915" | "xe"
-        ) {
+        let blocked = if crate::is_gpu_chip(&chip) {
             match text(&path.join("device/power/runtime_status")) {
                 // `unsupported` (runtime PM disabled) stays blocked: it can mask a
                 // device that was already suspended when PM was disabled.

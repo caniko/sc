@@ -428,8 +428,13 @@ impl CouplingEstimator {
             .collect();
 
         for (si, sensor) in self.sensor_names.iter().enumerate() {
-            let curr_t = sensor_temps.get(sensor).copied().unwrap_or(0.0);
-            let prev_t = self.prev_temps.get(sensor).copied().unwrap_or(0.0);
+            // A missing reading (read error, parked GPU) must not enter the
+            // lifetime sums as a ±T step; skip deltas that span one.
+            let (Some(&curr_t), Some(&prev_t)) =
+                (sensor_temps.get(sensor), self.prev_temps.get(sensor))
+            else {
+                continue;
+            };
             let dt = curr_t - prev_t;
 
             // Accumulate XᵀX
@@ -448,9 +453,7 @@ impl CouplingEstimator {
         for (name, &val) in fan_pwms {
             self.prev_pwms.insert(name.clone(), val as f64);
         }
-        for (name, &val) in sensor_temps {
-            self.prev_temps.insert(name.clone(), val);
-        }
+        self.prev_temps = sensor_temps.clone();
     }
 
     /// Solve normal equations for all sensors. Call periodically.
@@ -926,6 +929,31 @@ mod tests {
             "fan_b beta={:.3}, expected ~-0.3",
             bb
         );
+    }
+
+    #[test]
+    fn coupling_estimator_ignores_missing_readings() {
+        let fans = vec!["fan".to_string()];
+        let sensors = vec!["sensor".to_string()];
+        let mut est = CouplingEstimator::new(&fans, &sensors, 10);
+        let mut pwm: u8 = 100;
+        let mut temp = 60.0;
+        for i in 0..200 {
+            let new = (pwm as i16 + if i % 3 == 0 { 6 } else { -3 }).clamp(30, 230) as u8;
+            temp += -0.05 * (new as f64 - pwm as f64);
+            pwm = new;
+            let fan_map = HashMap::from([("fan".to_string(), pwm)]);
+            // One failed read mid-run.
+            let sensor_map = if i == 100 {
+                HashMap::new()
+            } else {
+                HashMap::from([("sensor".to_string(), temp)])
+            };
+            est.update(&fan_map, &sensor_map);
+        }
+        est.solve();
+        let beta = est.coupling_matrix()[0].beta;
+        assert!((beta + 0.5).abs() < 0.05, "beta={beta:.3}, expected ~-0.5");
     }
 
     #[test]

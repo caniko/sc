@@ -8,6 +8,11 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// hwmon chips that belong to runtime-PM-managed GPUs.
+pub fn is_gpu_chip(name: &str) -> bool {
+    matches!(name, "amdgpu" | "nvidia" | "nouveau" | "i915" | "xe")
+}
+
 /// Find all sysfs hwmon directories matching a chip name.
 pub fn find_hwmon_paths(chip_name: &str) -> Result<Vec<PathBuf>> {
     let hwmon_base = Path::new("/sys/class/hwmon");

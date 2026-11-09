@@ -8,6 +8,8 @@ pub struct Sensor {
     pub name: String,
     /// Path to tempN_input (reads millidegrees Celsius)
     input_path: PathBuf,
+    /// Runtime-PM status file, for GPU chips only.
+    runtime_status: Option<PathBuf>,
 }
 
 impl Sensor {
@@ -51,6 +53,7 @@ impl Sensor {
 
         Ok(Self {
             name: name.to_string(),
+            runtime_status: runtime_status_path(&hwmon_path),
             input_path,
         })
     }
@@ -68,8 +71,18 @@ impl Sensor {
 
         Ok(Self {
             name: name.to_string(),
+            runtime_status: runtime_status_path(hwmon_path),
             input_path,
         })
+    }
+
+    /// True while this sensor's GPU is runtime-suspended. A suspended GPU
+    /// produces no heat, and polling it can wake it, so callers skip it.
+    pub fn is_parked(&self) -> bool {
+        self.runtime_status
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .is_some_and(|s| matches!(s.trim(), "suspended" | "suspending"))
     }
 
     /// The hwmon directory this sensor belongs to.
@@ -81,5 +94,35 @@ impl Sensor {
     pub fn read_temp_c(&self) -> Result<f64> {
         let millidegrees: i64 = read_sysfs(&self.input_path)?;
         Ok(millidegrees as f64 / 1000.0)
+    }
+}
+
+fn runtime_status_path(hwmon_path: &std::path::Path) -> Option<PathBuf> {
+    let chip = std::fs::read_to_string(hwmon_path.join("name")).ok()?;
+    crate::is_gpu_chip(chip.trim()).then(|| hwmon_path.join("device/power/runtime_status"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suspended_gpu_sensor_is_parked() {
+        let dir = tempfile::tempdir().unwrap();
+        let chip = dir.path();
+        std::fs::create_dir_all(chip.join("device/power")).unwrap();
+        std::fs::write(chip.join("name"), "amdgpu\n").unwrap();
+        std::fs::write(chip.join("temp1_input"), "45000\n").unwrap();
+        let status = chip.join("device/power/runtime_status");
+        let sensor = Sensor::from_path("gpu", chip, 1).unwrap();
+
+        std::fs::write(&status, "suspended\n").unwrap();
+        assert!(sensor.is_parked());
+        std::fs::write(&status, "active\n").unwrap();
+        assert!(!sensor.is_parked());
+
+        std::fs::write(chip.join("name"), "k10temp\n").unwrap();
+        std::fs::write(&status, "suspended\n").unwrap();
+        assert!(!Sensor::from_path("cpu", chip, 1).unwrap().is_parked());
     }
 }

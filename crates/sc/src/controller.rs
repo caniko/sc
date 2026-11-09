@@ -227,8 +227,16 @@ fn control_tick(
     );
     let mut sensor_temps: HashMap<String, f64> = HashMap::new();
     let mut sensor_derivatives: HashMap<String, f64> = HashMap::new();
+    let mut parked: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for (sensor, tracker) in sensors.iter_mut() {
+        if sensor.is_parked() {
+            // Restart the derivative window so a resumed GPU is not compared
+            // against readings from before it slept.
+            *tracker = DerivativeTracker::new(config.derivative.window_size);
+            parked.insert(sensor.name.clone());
+            continue;
+        }
         match sensor.read_temp_c() {
             Ok(temp) if temp > 0.0 && temp <= 150.0 => {
                 tracker.push(temp);
@@ -249,21 +257,22 @@ fn control_tick(
 
     for (fan, mf) in fans.iter_mut().zip(managed_fans.iter_mut()) {
         let fan_config = &config.fans[mf.config_idx];
-        let readings =
-            linked_sensor_maxima(&fan_config.sensors, &sensor_temps, &sensor_derivatives);
+        let readings = linked_sensor_maxima(
+            &fan_config.sensors,
+            &sensor_temps,
+            &sensor_derivatives,
+            &parked,
+        );
 
         let (base_pwm, boost, target_pwm) = if let Some((max_temp, max_dt)) = readings {
-            if max_dt > config.derivative.boost_threshold {
-                mf.derivative_boost += max_dt * 5.0;
-            } else if max_dt < 0.0 {
-                let decay = config.derivative.decay_rate;
-                mf.derivative_boost = (mf.derivative_boost - decay).max(0.0);
-            } else {
-                mf.derivative_boost =
-                    (mf.derivative_boost - config.derivative.decay_rate * 0.5).max(0.0);
-            }
-
             let base_pwm = fan_config.interpolate_pwm(max_temp);
+            mf.derivative_boost = next_boost(
+                mf.derivative_boost,
+                max_temp,
+                max_dt,
+                base_pwm,
+                &config.derivative,
+            );
             let boost = mf.derivative_boost.round() as i16;
             let target_pwm = (base_pwm as i16 + boost).clamp(0, 255) as u8;
             (base_pwm, boost, target_pwm)
@@ -407,24 +416,63 @@ fn control_tick(
     Ok(())
 }
 
+/// Derivative boost for the next tick.
+///
+/// Rises with dT/dt above the threshold and decays otherwise; it never
+/// exceeds the headroom above `base_pwm`, and is cleared when every linked
+/// sensor is parked (`max_temp` = −∞), so an idle GPU's fan drops straight
+/// to its floor.
+fn next_boost(
+    boost: f64,
+    max_temp: f64,
+    max_dt: f64,
+    base_pwm: u8,
+    cfg: &sc_core::config::DerivativeConfig,
+) -> f64 {
+    if max_temp == f64::NEG_INFINITY {
+        return 0.0;
+    }
+    let boost = if max_dt > cfg.boost_threshold {
+        boost + max_dt * 5.0
+    } else if max_dt < 0.0 {
+        (boost - cfg.decay_rate).max(0.0)
+    } else {
+        (boost - cfg.decay_rate * 0.5).max(0.0)
+    };
+    boost.min(f64::from(u8::MAX - base_pwm))
+}
+
+/// Hottest temperature and fastest rise across a fan's linked sensors.
+///
+/// `None` (fail-safe) if any active linked sensor is unreadable. Parked
+/// sensors (runtime-suspended GPUs) are skipped; if every linked sensor is
+/// parked the fan idles at its curve floor (temperature −∞, no rise).
 fn linked_sensor_maxima(
     sensor_names: &[String],
     temperatures: &HashMap<String, f64>,
     derivatives: &HashMap<String, f64>,
+    parked: &std::collections::HashSet<String>,
 ) -> Option<(f64, f64)> {
     let mut max_temp = f64::NEG_INFINITY;
-    let mut max_dt: f64 = 0.0;
+    let mut max_dt = f64::NEG_INFINITY;
 
     for name in sensor_names {
+        if parked.contains(name) {
+            continue;
+        }
         let &temp = temperatures.get(name)?;
         let &dt = derivatives.get(name)?;
         max_temp = max_temp.max(temp);
-        if dt.abs() > max_dt.abs() {
-            max_dt = dt;
-        }
+        max_dt = max_dt.max(dt);
     }
 
-    max_temp.is_finite().then_some((max_temp, max_dt))
+    if max_temp.is_finite() {
+        Some((max_temp, max_dt))
+    } else if !sensor_names.is_empty() && sensor_names.iter().all(|n| parked.contains(n)) {
+        Some((f64::NEG_INFINITY, 0.0))
+    } else {
+        None
+    }
 }
 
 fn init_tracing() {
@@ -470,7 +518,7 @@ mod tests {
         let derivatives = HashMap::from([("cpu".to_owned(), 1.0)]);
 
         assert_eq!(
-            linked_sensor_maxima(&names, &temperatures, &derivatives),
+            linked_sensor_maxima(&names, &temperatures, &derivatives, &Default::default()),
             None
         );
     }
@@ -481,9 +529,39 @@ mod tests {
         let temperatures = HashMap::from([("cpu".to_owned(), 70.0), ("gpu".to_owned(), 80.0)]);
         let derivatives = HashMap::from([("cpu".to_owned(), -3.0), ("gpu".to_owned(), 2.0)]);
 
+        // A cooling sensor must not mask one that is heating up.
         assert_eq!(
-            linked_sensor_maxima(&names, &temperatures, &derivatives),
-            Some((80.0, -3.0))
+            linked_sensor_maxima(&names, &temperatures, &derivatives, &Default::default()),
+            Some((80.0, 2.0))
         );
+    }
+
+    #[test]
+    fn boost_is_capped_and_cleared_when_parked() {
+        let cfg = sc_core::config::DerivativeConfig {
+            window_size: 10,
+            boost_threshold: 2.0,
+            decay_rate: 0.0,
+        };
+        let boost = next_boost(0.0, 70.0, 40.0, 100, &cfg);
+        assert_eq!(boost, 155.0);
+        assert_eq!(next_boost(boost, f64::NEG_INFINITY, 0.0, 0, &cfg), 0.0);
+    }
+
+    #[test]
+    fn parked_gpu_sensors_idle_instead_of_fail_safe() {
+        let names = vec!["cpu".to_owned(), "gpu".to_owned()];
+        let temperatures = HashMap::from([("cpu".to_owned(), 60.0)]);
+        let derivatives = HashMap::from([("cpu".to_owned(), 0.5)]);
+        let gpu_parked = std::collections::HashSet::from(["gpu".to_owned()]);
+
+        assert_eq!(
+            linked_sensor_maxima(&names, &temperatures, &derivatives, &gpu_parked),
+            Some((60.0, 0.5))
+        );
+        let gpu_only = vec!["gpu".to_owned()];
+        let (temp, dt) =
+            linked_sensor_maxima(&gpu_only, &HashMap::new(), &HashMap::new(), &gpu_parked).unwrap();
+        assert!(temp == f64::NEG_INFINITY && dt == 0.0);
     }
 }
