@@ -131,19 +131,20 @@ pub fn optimize_config(
 /// Map coupling effectiveness to curve shape exponent.
 ///
 /// - High effectiveness (|beta| > 1.0): gamma = 1.5 (convex, gentle ramp — fan is effective)
-/// - Medium effectiveness (0.3-1.0): gamma = 1.0 (linear)
-/// - Low effectiveness (< 0.3): gamma = 0.7 (concave, aggressive ramp — fan needs to work harder)
+/// - Medium effectiveness (0.3-1.0): gamma = 1.0 → 1.5
+/// - Low effectiveness (< 0.3): gamma = 1.0 (linear)
+///
+/// Never concave: when a fan barely moves the temperature, ramping it harder
+/// buys noise, not cooling. On temperature-limited CPUs (e.g. Zen boosting to
+/// Tjmax) the measured beta is near zero by design.
 fn effectiveness_to_gamma(beta_abs: f64) -> f64 {
     if beta_abs > 1.0 {
         1.5
     } else if beta_abs >= 0.3 {
         // Linear interpolation from 1.0 to 1.5 across [0.3, 1.0]
         1.0 + (beta_abs - 0.3) / 0.7 * 0.5
-    } else if beta_abs > 0.0 {
-        // Linear interpolation from 0.7 to 1.0 across [0.0, 0.3]
-        0.7 + beta_abs / 0.3 * 0.3
     } else {
-        1.0 // No data, default linear
+        1.0 // Low or no measured effectiveness: linear
     }
 }
 
@@ -211,7 +212,7 @@ mod tests {
 
     #[test]
     fn gamma_low_effectiveness() {
-        assert!((effectiveness_to_gamma(0.15) - 0.85).abs() < 0.01);
+        assert!((effectiveness_to_gamma(0.15) - 1.0).abs() < 0.01);
     }
 
     #[test]

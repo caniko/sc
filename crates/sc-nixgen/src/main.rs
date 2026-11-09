@@ -180,7 +180,8 @@ fn main() -> Result<()> {
             }
 
             // Run benchmark with built-in stress
-            let tuning = benchmark::run_benchmark(&mut fans, &sensors, &sensor_names, &topo)?;
+            let (tuning, uncontrollable) =
+                benchmark::run_benchmark(&mut fans, &sensors, &sensor_names, &topo)?;
 
             let tuning_pkl =
                 pkl_format::to_pkl(&tuning).context("failed to serialize tuning data")?;
@@ -190,8 +191,9 @@ fn main() -> Result<()> {
 
             // Optionally generate Nix config
             if let Some(nix_path) = generate_nix {
-                // Filter out uncontrollable fans (those with no coupling data)
-                let controllable_config = filter_uncontrollable_fans(&config, &tuning);
+                // Drop fans that failed preflight. A controllable fan without a
+                // significant coupling stays and keeps its default sensors.
+                let controllable_config = filter_uncontrollable_fans(&config, &uncontrollable);
 
                 let optimized = optimize::optimize_config(
                     &controllable_config,
@@ -310,32 +312,16 @@ fn identify(name: &str, duration: u64, apply: bool) -> Result<()> {
 /// in the generated NixOS config.
 fn filter_uncontrollable_fans(
     config: &sc_core::config::Config,
-    tuning: &sc_core::ipc::TuningResponse,
+    uncontrollable: &[String],
 ) -> sc_core::config::Config {
-    let fans_with_data: std::collections::HashSet<&str> = tuning
-        .coupling_matrix
-        .iter()
-        .map(|e| e.fan.as_str())
-        .collect();
-
     let mut filtered = config.clone();
-    let removed: Vec<String> = filtered
-        .fans
-        .iter()
-        .filter(|f| !fans_with_data.contains(f.name.as_str()))
-        .map(|f| f.name.clone())
-        .collect();
-
-    if !removed.is_empty() {
+    if !uncontrollable.is_empty() {
         eprintln!(
             "Excluding uncontrollable fans from config: {}",
-            removed.join(", ")
+            uncontrollable.join(", ")
         );
-        filtered
-            .fans
-            .retain(|f| fans_with_data.contains(f.name.as_str()));
+        filtered.fans.retain(|f| !uncontrollable.contains(&f.name));
     }
-
     filtered
 }
 

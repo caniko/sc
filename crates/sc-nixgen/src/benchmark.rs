@@ -6,7 +6,7 @@ use sc_core::config::{
     AirflowDirection, Config, CurvePoint, DerivativeConfig, FanConfig, FanPosition, FanTopology,
     SensorConfig,
 };
-use sc_core::ipc::{CouplingEntry, StepResponseEntry, TuningResponse};
+use sc_core::ipc::{CouplingEntry, TuningResponse};
 use sc_detect::DetectionResult;
 use sc_hwmon::fan::{Fan, FanControlGuard};
 use sc_hwmon::sensor::Sensor;
@@ -20,8 +20,13 @@ const PWM_LEVELS: &[u8] = &[40, 100, 180, 255];
 /// Polling interval during sampling (ms).
 const POLL_MS: u64 = 500;
 
-/// Minimum temperature variance (°C²) to consider a coupling meaningful.
-const MIN_TEMP_VARIANCE: f64 = 0.01;
+/// Settle detection: trailing window of samples used for the drift fit.
+const SETTLE_WINDOW: usize = 40; // 20 s at POLL_MS
+const SETTLE_MIN_SECS: f64 = 20.0;
+/// Heatsink time constants are 30-120 s; give up well after that.
+const SETTLE_MAX_SECS: f64 = 150.0;
+/// Settled when the upper 95% bound of |drift| is below this (°C/min).
+const SETTLE_MAX_DRIFT_C_PER_MIN: f64 = 0.5;
 
 /// Seconds to wait for stress to raise temps before sweeping.
 const STRESS_WARMUP_SECS: u64 = 30;
@@ -476,53 +481,52 @@ fn default_curve() -> Vec<CurvePoint> {
 
 // ─── Adaptive settle detection ──────────────────────────────────────────────
 
-fn wait_for_settle(sensors: &[Sensor], interrupt: &InterruptGuard) -> Result<Vec<f64>> {
-    let min_secs = 5;
-    let max_secs = 20;
-    let alpha_fast = 0.3;
-    let alpha_slow = 0.1;
-    let convergence_threshold = 0.15;
-
-    let n = sensors.len();
-    let mut ewma_fast = vec![0.0f64; n];
-    let mut ewma_slow = vec![0.0f64; n];
-    let mut initialized = false;
-
+/// Wait until every watched sensor has stopped drifting.
+///
+/// Fits an OLS line to the trailing `SETTLE_WINDOW` samples of each watched
+/// sensor and declares it settled once `|slope| + t·SE(slope)` is below
+/// `SETTLE_MAX_DRIFT_C_PER_MIN`, i.e. a drift is statistically excluded
+/// rather than merely unobserved in short-horizon noise.
+fn wait_for_settle(sensors: &[Sensor], watch: &[bool], interrupt: &InterruptGuard) -> Result<()> {
     let start = std::time::Instant::now();
+    let mut history: Vec<std::collections::VecDeque<(f64, f64)>> =
+        vec![std::collections::VecDeque::with_capacity(SETTLE_WINDOW); sensors.len()];
 
     loop {
         interrupt.check()?;
-        let elapsed = start.elapsed().as_secs();
-        let temps = read_temperatures(sensors)?;
-
-        if !initialized {
-            ewma_fast = temps.clone();
-            ewma_slow = temps.clone();
-            initialized = true;
-        } else {
-            for i in 0..n {
-                ewma_fast[i] = alpha_fast * temps[i] + (1.0 - alpha_fast) * ewma_fast[i];
-                ewma_slow[i] = alpha_slow * temps[i] + (1.0 - alpha_slow) * ewma_slow[i];
+        let elapsed = start.elapsed().as_secs_f64();
+        for (h, temp) in history.iter_mut().zip(read_temperatures(sensors)?) {
+            if h.len() == SETTLE_WINDOW {
+                h.pop_front();
             }
+            h.push_back((elapsed, temp));
         }
 
-        if elapsed >= min_secs {
-            let max_diff = ewma_fast
+        if elapsed >= SETTLE_MIN_SECS
+            && history
                 .iter()
-                .zip(ewma_slow.iter())
-                .map(|(f, s)| (f - s).abs())
-                .fold(0.0f64, f64::max);
-
-            if max_diff < convergence_threshold {
-                return Ok(temps);
-            }
+                .zip(watch)
+                .filter(|(_, w)| **w)
+                .all(|(h, _)| drift_upper_bound(h) < SETTLE_MAX_DRIFT_C_PER_MIN / 60.0)
+        {
+            return Ok(());
         }
-
-        if elapsed >= max_secs {
-            return Ok(temps);
+        if elapsed >= SETTLE_MAX_SECS {
+            eprint!("(still drifting after {:.0}s) ", SETTLE_MAX_SECS);
+            return Ok(());
         }
 
         interrupt.sleep(Duration::from_millis(POLL_MS))?;
+    }
+}
+
+/// Upper 95% confidence bound of |dT/dt| (°C/s) for a series of (t, temp).
+fn drift_upper_bound(samples: &std::collections::VecDeque<(f64, f64)>) -> f64 {
+    let x: Vec<Vec<f64>> = samples.iter().map(|(t, _)| vec![1.0, *t]).collect();
+    let y: Vec<f64> = samples.iter().map(|(_, temp)| *temp).collect();
+    match ols(&x, &y) {
+        Some(fit) => fit.coef[1].abs() + t_critical_95(fit.dof) * fit.se[1],
+        None => f64::INFINITY,
     }
 }
 
@@ -647,8 +651,33 @@ fn find_stall_threshold(fan: &mut Fan, interrupt: &InterruptGuard) -> Result<u8>
 /// Per-fan measurement data collected during a stress phase.
 struct PhaseMeasurement {
     fan_name: String,
-    /// For each PWM level: (pwm, per-sensor average temps)
-    readings: Vec<(u8, Vec<f64>)>,
+    /// For each PWM level: (pwm, seconds since sweep start, per-sensor average temps)
+    readings: Vec<(u8, f64, Vec<f64>)>,
+}
+
+/// Order sweep levels so PWM is not monotone in time, then repeat the first
+/// (highest) level at the end.
+///
+/// A monotone high→low sweep makes PWM perfectly collinear with elapsed time,
+/// so any residual heat soak is attributed to the fan. Alternating extremes
+/// plus a repeated reference make a linear drift term identifiable.
+fn sweep_order(mut levels: Vec<u8>) -> Vec<u8> {
+    levels.sort_unstable_by(|a, b| b.cmp(a));
+    levels.dedup();
+    let mut order = Vec::with_capacity(levels.len() + 1);
+    let (mut lo, mut hi) = (0, levels.len());
+    while lo < hi {
+        order.push(levels[lo]);
+        lo += 1;
+        if lo < hi {
+            hi -= 1;
+            order.push(levels[hi]);
+        }
+    }
+    if let Some(&first) = order.first() {
+        order.push(first);
+    }
+    order
 }
 
 /// Run stress-based thermal coupling benchmark.
@@ -663,7 +692,7 @@ pub fn run_benchmark(
     sensors: &[Sensor],
     sensor_names: &[String],
     topo: &Topology,
-) -> Result<TuningResponse> {
+) -> Result<(TuningResponse, Vec<String>)> {
     let interrupt = InterruptGuard::new()?;
     // Keep the guard alive for the complete benchmark.  Every PWM write and
     // every early-return path is therefore followed by restoration of the
@@ -689,10 +718,19 @@ pub fn run_benchmark(
         n_phases,
     );
 
-    let est_secs = 30
-        + n_phases as u64
-            * (STRESS_WARMUP_SECS + n_sweepable as u64 * PWM_LEVELS.len() as u64 * 12);
-    eprintln!("Estimated duration: ~{} minutes", est_secs / 60 + 1);
+    // Per level: settle (SETTLE_MIN_SECS..SETTLE_MAX_SECS) + sample; levels =
+    // PWM_LEVELS + stall level + the repeated reference level.
+    let levels = PWM_LEVELS.len() as u64 + 2;
+    let per_level = |settle: f64| settle as u64 + STRESS_SAMPLE_SECS;
+    let est = |settle: f64| {
+        30 + n_phases as u64
+            * (STRESS_WARMUP_SECS + n_sweepable as u64 * levels * per_level(settle))
+    };
+    eprintln!(
+        "Estimated duration: {}-{} minutes",
+        est(SETTLE_MIN_SECS) / 60 + 1,
+        est(SETTLE_MAX_SECS) / 60 + 1
+    );
 
     // ── Pre-flight: controllability check ───────────────────────────────────
 
@@ -751,7 +789,7 @@ pub fn run_benchmark(
             write_pwm_safe(fan, 255)?;
         }
     }
-    wait_for_settle(sensors, &interrupt)?;
+    wait_for_settle(sensors, &vec![true; sensors.len()], &interrupt)?;
     let baseline = sample_temps(sensors, 3, &interrupt)?;
     eprintln!("Baseline temperatures (full cooling):");
     for (i, name) in sensor_names.iter().enumerate() {
@@ -803,11 +841,17 @@ pub fn run_benchmark(
         "\nBenchmark complete. {} coupling entries.",
         tuning.coupling_matrix.len()
     );
+    let uncontrollable = fans
+        .iter()
+        .zip(&controllable)
+        .filter(|(_, ok)| !**ok)
+        .map(|(fan, _)| fan.name.clone())
+        .collect();
     control
         .restore()
         .context("failed to restore fan control after benchmark")?;
 
-    Ok(tuning)
+    Ok((tuning, uncontrollable))
 }
 
 /// Run a single stress phase (CPU or GPU):
@@ -894,24 +938,24 @@ where
         let stall = *stall_thresholds.get(&cf.name).unwrap_or(&0);
         let mut readings = Vec::new();
 
-        // Sweep from high to low PWM (start with max cooling, reduce to see temp rise)
-        let effective_levels: Vec<u8> = {
-            let mut levels: Vec<u8> = PWM_LEVELS.iter().copied().filter(|&p| p > stall).collect();
-            // Add stall threshold as lowest level
-            levels.insert(0, stall.max(1));
-            // Sort descending: high PWM (max cooling) first
-            levels.sort_unstable_by(|a, b| b.cmp(a));
-            levels
-        };
+        let mut levels: Vec<u8> = PWM_LEVELS.iter().copied().filter(|&p| p > stall).collect();
+        levels.insert(0, stall.max(1));
+        let effective_levels = sweep_order(levels);
+        let watch: Vec<bool> = sensor_names
+            .iter()
+            .map(|n| n.starts_with(target_prefix))
+            .collect();
+        let sweep_start = std::time::Instant::now();
 
         for &pwm in &effective_levels {
             interrupt.check()?;
             eprint!("    PWM={:>3} ... ", pwm);
-            write_pwm_safe(&mut fans[fan_idx], pwm)?;
+            let pwm = write_pwm_safe(&mut fans[fan_idx], pwm)?;
 
-            // Shorter settle during stress — temps move faster under load
-            wait_for_settle(sensors, interrupt)?;
+            wait_for_settle(sensors, &watch, interrupt)?;
 
+            // Time at the middle of the sampling window, for the drift term.
+            let t_mid = sweep_start.elapsed().as_secs_f64() + STRESS_SAMPLE_SECS as f64 / 2.0;
             let temps = sample_temps(sensors, STRESS_SAMPLE_SECS, interrupt)?;
 
             // Print only target sensors
@@ -923,7 +967,7 @@ where
                 .collect();
             eprintln!("{}", temp_str.join(", "));
 
-            readings.push((pwm, temps));
+            readings.push((pwm, t_mid, temps));
         }
 
         // Restore to max cooling before next fan
@@ -952,7 +996,12 @@ where
 
 /// Compute thermal coupling from stress benchmark measurements.
 ///
-/// For each fan×sensor pair, fits a linear regression of temperature vs PWM.
+/// For each fan×sensor pair, fits `temp = a + b·pwm + c·t` by OLS, where `t`
+/// is elapsed sweep time; the drift term absorbs residual heat soak that the
+/// interleaved sweep order makes separable from the fan effect. A coupling is
+/// kept only when `b` differs from zero at the 95% level. When a pair is
+/// measured in several stress phases, the most precise (smallest standard
+/// error) estimate wins; picking the largest |beta| would select noise.
 /// Negative beta = fan cools that sensor. Positive beta = fan heats it.
 /// Group followers inherit their representative's data.
 fn compute_tuning(
@@ -960,71 +1009,51 @@ fn compute_tuning(
     classified: &[ClassifiedFan],
     sensor_names: &[String],
 ) -> TuningResponse {
-    let mut coupling_matrix = Vec::new();
-    let mut step_responses = Vec::new();
-
-    // Track best coupling per (fan, sensor) pair across phases
-    let mut best_coupling: std::collections::HashMap<(String, String), (f64, f64)> =
-        std::collections::HashMap::new();
+    // (fan, sensor) -> (beta, se(beta), r², dof); beta and se in °C per +10 PWM.
+    type Estimate = (f64, f64, f64, usize);
+    let mut best_coupling: std::collections::BTreeMap<(String, String), Estimate> =
+        std::collections::BTreeMap::new();
 
     for measurement in measurements {
+        let x: Vec<Vec<f64>> = measurement
+            .readings
+            .iter()
+            .map(|(pwm, t, _)| vec![1.0, *pwm as f64, *t])
+            .collect();
         for (sensor_idx, sensor_name) in sensor_names.iter().enumerate() {
-            let readings: Vec<(f64, f64)> = measurement
+            let y: Vec<f64> = measurement
                 .readings
                 .iter()
-                .map(|(pwm, temps)| (*pwm as f64, temps[sensor_idx]))
+                .map(|(_, _, temps)| temps[sensor_idx])
                 .collect();
-
-            if readings.len() < 2 {
+            let Some(fit) = ols(&x, &y) else {
+                continue;
+            };
+            let se = fit.se[1] * 10.0;
+            if !se.is_finite() {
                 continue;
             }
-
-            let temps: Vec<f64> = readings.iter().map(|(_, t)| *t).collect();
-            let t_mean = temps.iter().sum::<f64>() / temps.len() as f64;
-            let variance =
-                temps.iter().map(|t| (t - t_mean).powi(2)).sum::<f64>() / temps.len() as f64;
-            if variance < MIN_TEMP_VARIANCE {
-                continue;
-            }
-
-            let (slope, _intercept, r_squared) = linear_regression(&readings);
-            let beta = slope * 10.0;
-
             let key = (measurement.fan_name.clone(), sensor_name.clone());
-
-            // Keep the measurement with strongest |beta| and reasonable R²
-            let dominated = best_coupling.get(&key).is_some_and(|(prev_beta, prev_r2)| {
-                // Keep existing if it has stronger coupling with decent R²
-                prev_beta.abs() > beta.abs() && *prev_r2 > 0.3
-            });
-
-            if !dominated {
-                best_coupling.insert(key, (beta, r_squared));
+            if best_coupling
+                .get(&key)
+                .is_none_or(|(_, prev_se, _, _)| se < *prev_se)
+            {
+                best_coupling.insert(key, (fit.coef[1] * 10.0, se, fit.r_squared, fit.dof));
             }
         }
     }
 
-    // Convert best couplings to entries
-    for ((fan_name, sensor_name), (beta, r_squared)) in &best_coupling {
-        coupling_matrix.push(CouplingEntry {
-            fan: fan_name.clone(),
-            sensor: sensor_name.clone(),
-            beta: *beta,
-            r_squared: *r_squared,
-        });
-
-        step_responses.push(StepResponseEntry {
-            fan: fan_name.clone(),
-            sensor: sensor_name.clone(),
-            gain_k: beta / 10.0,
-            tau_ticks: 10.0,
-            n_events: measurements
-                .iter()
-                .filter(|m| m.fan_name == *fan_name)
-                .map(|m| m.readings.len())
-                .sum(),
-        });
-    }
+    // Test significance only on the selected (most precise) estimate.
+    let mut coupling_matrix: Vec<CouplingEntry> = best_coupling
+        .into_iter()
+        .filter(|(_, (beta, se, _, dof))| *beta != 0.0 && beta.abs() > t_critical_95(*dof) * se)
+        .map(|((fan, sensor), (beta, _, r_squared, _))| CouplingEntry {
+            fan,
+            sensor,
+            beta,
+            r_squared,
+        })
+        .collect();
 
     // Propagate to group followers
     for cf in classified {
@@ -1034,66 +1063,194 @@ fn compute_tuning(
                 .filter(|e| e.fan == *representative)
                 .map(|e| CouplingEntry {
                     fan: cf.name.clone(),
-                    sensor: e.sensor.clone(),
-                    beta: e.beta,
-                    r_squared: e.r_squared,
+                    ..e.clone()
                 })
                 .collect();
             coupling_matrix.extend(rep_entries);
-
-            let rep_steps: Vec<StepResponseEntry> = step_responses
-                .iter()
-                .filter(|e| e.fan == *representative)
-                .map(|e| StepResponseEntry {
-                    fan: cf.name.clone(),
-                    sensor: e.sensor.clone(),
-                    gain_k: e.gain_k,
-                    tau_ticks: e.tau_ticks,
-                    n_events: e.n_events,
-                })
-                .collect();
-            step_responses.extend(rep_steps);
         }
     }
 
     TuningResponse {
         coupling_matrix,
-        step_responses,
+        // A steady-state sweep identifies static gains only; time constants
+        // come from the daemon's online step-response fitter.
+        step_responses: Vec::new(),
         cross_correlations: Vec::new(),
         thermal_integrals: Vec::new(),
     }
 }
 
-/// Simple linear regression: y = a + b*x. Returns (slope, intercept, r²).
-fn linear_regression(data: &[(f64, f64)]) -> (f64, f64, f64) {
-    let n = data.len() as f64;
-    let sum_x: f64 = data.iter().map(|(x, _)| x).sum();
-    let sum_y: f64 = data.iter().map(|(_, y)| y).sum();
-    let sum_xx: f64 = data.iter().map(|(x, _)| x * x).sum();
-    let sum_xy: f64 = data.iter().map(|(x, y)| x * y).sum();
+struct OlsFit {
+    coef: Vec<f64>,
+    se: Vec<f64>,
+    r_squared: f64,
+    dof: usize,
+}
 
-    let denom = n * sum_xx - sum_x * sum_x;
-    if denom.abs() < 1e-12 {
-        return (0.0, sum_y / n, 0.0);
+/// Ordinary least squares via the normal equations (fine for p ≤ 3).
+/// Returns `None` when the design is singular or has no residual degrees
+/// of freedom.
+fn ols(x: &[Vec<f64>], y: &[f64]) -> Option<OlsFit> {
+    let n = y.len();
+    let p = x.first()?.len();
+    if n <= p {
+        return None;
+    }
+    // Augmented [XᵀX | I] for Gauss-Jordan inversion.
+    let mut m = vec![vec![0.0; 2 * p]; p];
+    for (i, row) in m.iter_mut().enumerate() {
+        for j in 0..p {
+            row[j] = x.iter().map(|r| r[i] * r[j]).sum();
+        }
+        row[p + i] = 1.0;
+    }
+    for col in 0..p {
+        let pivot = (col..p).max_by(|&a, &b| m[a][col].abs().total_cmp(&m[b][col].abs()))?;
+        let scale = m.iter().map(|r| r[col].abs()).fold(0.0, f64::max);
+        if m[pivot][col].abs() <= 1e-10 * scale.max(1.0) {
+            return None;
+        }
+        m.swap(col, pivot);
+        let d = m[col][col];
+        m[col].iter_mut().for_each(|v| *v /= d);
+        for r in 0..p {
+            if r != col {
+                let f = m[r][col];
+                let pivot_row = m[col].clone();
+                m[r].iter_mut()
+                    .zip(pivot_row)
+                    .for_each(|(v, pv)| *v -= f * pv);
+            }
+        }
+    }
+    let inv: Vec<&[f64]> = m.iter().map(|r| &r[p..]).collect();
+    let xty: Vec<f64> = (0..p)
+        .map(|j| x.iter().zip(y).map(|(r, yi)| r[j] * yi).sum())
+        .collect();
+    let coef: Vec<f64> = (0..p)
+        .map(|i| (0..p).map(|j| inv[i][j] * xty[j]).sum())
+        .collect();
+
+    let ss_res: f64 = x
+        .iter()
+        .zip(y)
+        .map(|(r, yi)| (yi - r.iter().zip(&coef).map(|(a, b)| a * b).sum::<f64>()).powi(2))
+        .sum();
+    let y_mean = y.iter().sum::<f64>() / n as f64;
+    let ss_tot: f64 = y.iter().map(|yi| (yi - y_mean).powi(2)).sum();
+    let dof = n - p;
+    let sigma2 = ss_res / dof as f64;
+    Some(OlsFit {
+        se: (0..p)
+            .map(|i| (sigma2 * inv[i][i]).max(0.0).sqrt())
+            .collect(),
+        coef,
+        r_squared: if ss_tot > 1e-12 {
+            1.0 - ss_res / ss_tot
+        } else {
+            0.0
+        },
+        dof,
+    })
+}
+
+/// Two-sided 95% Student-t critical value.
+fn t_critical_95(dof: usize) -> f64 {
+    const TABLE: [f64; 10] = [
+        12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228,
+    ];
+    match dof {
+        0 => f64::INFINITY,
+        1..=10 => TABLE[dof - 1],
+        11..=20 => 2.086,
+        21..=40 => 2.021,
+        _ => 1.96,
+    }
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::*;
+
+    #[test]
+    fn sweep_order_interleaves_and_repeats_reference() {
+        assert_eq!(
+            sweep_order(vec![30, 40, 100, 180, 255]),
+            vec![255, 30, 180, 40, 100, 255]
+        );
     }
 
-    let slope = (n * sum_xy - sum_x * sum_y) / denom;
-    let intercept = (sum_y - slope * sum_x) / n;
+    #[test]
+    fn drift_is_not_mistaken_for_fan_effect() {
+        let classified = vec![ClassifiedFan {
+            name: "fan".into(),
+            role: FanRole::DirectCooler,
+        }];
+        let names = vec!["cpu".to_string(), "drift_only".to_string()];
+        // True model: cpu cools 0.5 °C per +10 PWM; both sensors heat-soak
+        // at 0.02 °C/s; small deterministic "noise".
+        let noise = [0.05, -0.04, 0.03, -0.05, 0.04, -0.03];
+        let readings = sweep_order(vec![30, 40, 100, 180, 255])
+            .into_iter()
+            .enumerate()
+            .map(|(i, pwm)| {
+                let t = 60.0 * i as f64;
+                let soak = 0.02 * t + noise[i];
+                (pwm, t, vec![90.0 - 0.05 * pwm as f64 + soak, 60.0 + soak])
+            })
+            .collect();
+        let tuning = compute_tuning(
+            &[PhaseMeasurement {
+                fan_name: "fan".into(),
+                readings,
+            }],
+            &classified,
+            &names,
+        );
 
-    let y_mean = sum_y / n;
-    let ss_tot: f64 = data.iter().map(|(_, y)| (y - y_mean).powi(2)).sum();
-    let ss_res: f64 = data
-        .iter()
-        .map(|(x, y)| {
-            let predicted = intercept + slope * x;
-            (y - predicted).powi(2)
-        })
-        .sum();
-    let r_squared = if ss_tot > 1e-12 {
-        1.0 - ss_res / ss_tot
-    } else {
-        0.0
-    };
+        assert_eq!(
+            tuning.coupling_matrix.len(),
+            1,
+            "{:?}",
+            tuning.coupling_matrix
+        );
+        let entry = &tuning.coupling_matrix[0];
+        assert_eq!(entry.sensor, "cpu");
+        assert!((entry.beta + 0.5).abs() < 0.05, "beta = {}", entry.beta);
+        assert!(tuning.step_responses.is_empty());
+    }
 
-    (slope, intercept, r_squared)
+    #[test]
+    fn precise_null_phase_overrides_noisy_significant_phase() {
+        let classified = vec![ClassifiedFan {
+            name: "fan".into(),
+            role: FanRole::DirectCooler,
+        }];
+        let names = vec!["board".to_string()];
+        let phase = |slope: f64, noise: [f64; 6]| PhaseMeasurement {
+            fan_name: "fan".into(),
+            readings: sweep_order(vec![30, 40, 100, 180, 255])
+                .into_iter()
+                .enumerate()
+                .map(|(i, pwm)| {
+                    (
+                        pwm,
+                        60.0 * i as f64,
+                        vec![50.0 + slope * pwm as f64 + noise[i]],
+                    )
+                })
+                .collect(),
+        };
+        // Noisy phase: significant cooling on its own. Precise phase: no effect.
+        let noisy = phase(-0.05, [0.4, -0.3, 0.2, -0.4, 0.3, -0.2]);
+        let precise = phase(0.0, [0.01, -0.01, 0.005, -0.01, 0.01, -0.005]);
+        let alone = compute_tuning(std::slice::from_ref(&noisy), &classified, &names);
+        assert_eq!(alone.coupling_matrix.len(), 1);
+        let tuning = compute_tuning(&[noisy, precise], &classified, &names);
+        assert!(
+            tuning.coupling_matrix.is_empty(),
+            "{:?}",
+            tuning.coupling_matrix
+        );
+    }
 }
