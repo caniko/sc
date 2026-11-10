@@ -5,7 +5,7 @@
 //! cooperative ownership, not exclusion of kernel or unrelated root writers.
 //! The current daemon does not use this contract to enable GPU control.
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RawPoint {
