@@ -78,4 +78,17 @@ Profile names are `balanced`, `performance`, `quiet`, `low_power`, and `custom`;
 
 The module writes `/etc/smartcool/asusd.pkl` and starts `smartcool-asusd.service` after and as part of `asusd.service`. The oneshot runs `sc asusd apply --config /etc/smartcool/asusd.pkl --apply`, so it uses the same capability checks, exact read-back, and rollback behavior as the CLI. It does not write `fan_curves.ron` or `services.asusd.fanCurvesConfig`.
 
+### Laptop mode
+
+`services.smartcool.asusd.laptopMode.fanStopTemp` keeps fans stopped for as long as the chosen temperatures allow, to limit fan running hours:
+
+```nix
+services.smartcool.asusd.laptopMode.fanStopTemp = {
+  CPU = 65;
+  GPU = 60;
+};
+```
+
+In every profile, curve points at or below a fan's stop temperature request zero PWM (`laptop_fan_stop_c` in the Pkl config). The firmware interpolates the ramp from the last stopped point and owns start/stop hysteresis. The final curve point is never rewritten, so a stop temperature at or above it is rejected. A stored zero is a request, not proof: confirm with `sc asusd monitor --expect-stopped`, and choose temperatures the chassis and battery tolerate without airflow.
+
 Firmware curves are stored and activated by `asusd` when platform profiles change. By contrast, `services.smartcool.enable` starts a live controller that continuously drives hwmon PWM channels from sensor readings. Do not enable the live daemon merely to use firmware curves.

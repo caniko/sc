@@ -123,6 +123,10 @@
     profiles = new Listing {
       ${lib.concatStringsSep "\n" (lib.mapAttrsToList asusdProfile asusdCfg.profiles)}
     }
+
+    laptop_fan_stop_c = new Mapping {
+      ${lib.concatStringsSep "\n" (lib.mapAttrsToList (fan: temp: "[${pklString fan}] = ${toString temp}") asusdCfg.laptopMode.fanStopTemp)}
+    }
   '';
 in {
   options.services.smartcool = {
@@ -157,6 +161,22 @@ in {
           default = {};
           description = "Qualified host-specific quiet envelopes serialized to QuietPolicy.pkl. The supervisor owns GPU locked clocks while active.";
         };
+      };
+
+      laptopMode.fanStopTemp = lib.mkOption {
+        type = lib.types.attrsOf (lib.types.ints.between 0 100);
+        default = {};
+        example = {
+          CPU = 65;
+          GPU = 60;
+        };
+        description = ''
+          Laptop mode, for fan longevity: per-fan temperature in degrees Celsius
+          through which every profile requests a stopped fan. Curve points at or
+          below it are rewritten to zero PWM; the final point is never rewritten.
+          Calibrate per machine: a stopped fan trades chassis and battery heat
+          for fewer running hours.
+        '';
       };
 
       profiles = lib.mkOption {

@@ -11,3 +11,6 @@ class Profile {
 }
 
 profiles: Listing<Profile>
+
+/// Laptop mode: per-fan temperature (°C) through which the fan stays stopped.
+laptop_fan_stop_c: Mapping<"CPU" | "GPU" | "MID", UInt> = new {}

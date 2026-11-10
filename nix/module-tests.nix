@@ -127,6 +127,7 @@
           (curve // {fan = "GPU";})
         ];
       };
+      laptopMode.fanStopTemp.CPU = 50;
     };
   };
 

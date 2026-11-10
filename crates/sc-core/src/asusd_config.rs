@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 pub type WireCurve = (String, [u8; 8], [u8; 8], bool);
@@ -8,6 +8,10 @@ pub type WireCurve = (String, [u8; 8], [u8; 8], bool);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub profiles: Vec<ProfileConfig>,
+    /// Laptop mode: per-fan temperature (°C) through which the fan stays
+    /// stopped, trading idle temperature for fewer fan running hours.
+    #[serde(default)]
+    pub laptop_fan_stop_c: HashMap<String, u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,10 +132,40 @@ impl CurveConfig {
 }
 
 pub fn load(path: &Path) -> Result<Config> {
-    let config = super::config::load_pkl(path)
+    let mut config: Config = super::config::load_pkl(path)
         .with_context(|| format!("failed to evaluate asusd Pkl config: {}", path.display()))?;
     validate(&config)?;
+    apply_laptop_mode(&mut config)?;
     Ok(config)
+}
+
+/// Request zero PWM at every curve point at or below the fan's stop
+/// temperature. Firmware interpolates the ramp from the last stopped point and
+/// owns start/stop hysteresis; the final full-cooling point is never touched.
+fn apply_laptop_mode(config: &mut Config) -> Result<()> {
+    let mut stops = HashMap::new();
+    for (fan, stop) in &config.laptop_fan_stop_c {
+        stops.insert(Fan::parse(fan)?, *stop);
+    }
+    for profile in &mut config.profiles {
+        for curve in &mut profile.curves {
+            let Some(stop) = stops.get(&Fan::parse(&curve.fan)?) else {
+                continue;
+            };
+            anyhow::ensure!(
+                *stop < curve.temp[7],
+                "laptop mode fan stop for '{}' in profile '{}' must stay below the final curve point",
+                curve.fan,
+                profile.name
+            );
+            for (temp, pwm) in curve.temp.iter().zip(&mut curve.pwm) {
+                if temp <= stop {
+                    *pwm = 0;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn validate(config: &Config) -> Result<()> {
@@ -223,7 +257,24 @@ mod tests {
                     enabled: true,
                 }],
             }],
+            laptop_fan_stop_c: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn laptop_mode_stops_fans_through_the_stop_temperature() {
+        let mut config = test_config();
+        config.laptop_fan_stop_c.insert("CPU".into(), 60);
+        apply_laptop_mode(&mut config).unwrap();
+        assert_eq!(
+            config.profiles[0].curves[0].pwm,
+            [0, 0, 0, 0, 100, 150, 210, 255]
+        );
+        validate(&config).unwrap();
+
+        // The full-cooling endpoint must survive.
+        config.laptop_fan_stop_c.insert("CPU".into(), 100);
+        assert!(apply_laptop_mode(&mut config).is_err());
     }
 
     #[test]
@@ -265,7 +316,11 @@ profiles = new Listing {
 
     #[test]
     fn rejects_empty_and_duplicate_profiles() {
-        assert!(validate(&Config { profiles: vec![] }).is_err());
+        assert!(validate(&Config {
+            profiles: vec![],
+            laptop_fan_stop_c: HashMap::new(),
+        })
+        .is_err());
         let mut config = test_config();
         config.profiles[0].curves.clear();
         assert!(validate(&config)
@@ -393,6 +448,10 @@ profiles = new Listing {{
     }}
   }}
 }}
+
+laptop_fan_stop_c = new Mapping {{
+  ["GPU"] = 40
+}}
 "#
             ),
         )
@@ -400,6 +459,7 @@ profiles = new Listing {{
 
         let config = load(&path).unwrap();
         assert_eq!(config.profiles[0].curves[0].wire().unwrap().0, "GPU");
+        assert_eq!(config.profiles[0].curves[0].pwm[..3], [0, 0, 30]);
 
         std::fs::write(&path, format!("amends \"{schema}\"\nprofiles = 1\n")).unwrap();
         let error = format!("{:#}", load(&path).unwrap_err());

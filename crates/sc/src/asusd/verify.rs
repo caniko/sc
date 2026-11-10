@@ -159,6 +159,7 @@ mod tests {
                 name: "quiet".into(),
                 curves: vec![curve],
             }],
+            laptop_fan_stop_c: HashMap::new(),
         };
         let snapshot = Snapshot {
             fans: vec![FanReading {
