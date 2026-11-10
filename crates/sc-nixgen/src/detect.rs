@@ -121,11 +121,10 @@ pub fn print_summary(result: &DetectionResult) {
     } else {
         eprintln!("  Fans:");
         for f in &result.fans {
-            let rpm = match f.current_rpm {
-                Some(0) => "0 RPM (stopped?)".to_string(),
-                Some(r) => format!("{} RPM", r),
-                None => "no RPM sensor".to_string(),
-            };
+            let pwm = std::fs::read_to_string(f.hwmon_path.join(format!("pwm{}", f.pwm_index)))
+                .ok()
+                .and_then(|s| s.trim().parse().ok());
+            let rpm = rpm_label(f.current_rpm, pwm);
             eprintln!(
                 "    {:<16} {:<12} pwm{}   {}",
                 f.auto_name, f.hwmon_chip, f.pwm_index, rpm
@@ -269,6 +268,19 @@ fn select_curve(fan: &DetectedFan, mapped_sensors: &[&DetectedSensor]) -> Vec<Cu
         .collect()
 }
 
+/// Describe a fan's tachometer reading. A fan that is driven hard and still
+/// reads 0 RPM is not stopped: its header is empty or has no tachometer wire.
+fn rpm_label(rpm: Option<u32>, pwm: Option<u32>) -> String {
+    match (rpm, pwm) {
+        (None, _) => "no RPM sensor".to_string(),
+        (Some(0), Some(pwm)) if pwm >= 128 => {
+            format!("0 RPM at PWM {pwm} (no fan connected, or no tachometer)")
+        }
+        (Some(0), Some(pwm)) => format!("0 RPM at PWM {pwm} (stopped)"),
+        (Some(r), _) => format!("{r} RPM"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,5 +379,13 @@ mod tests {
 
         let config = build_config(&result);
         assert_eq!(config.fans[0].sensors, vec!["cpu", "gpu"]);
+    }
+
+    #[test]
+    fn empty_headers_are_not_called_stopped() {
+        assert!(rpm_label(Some(0), Some(225)).contains("no fan connected"));
+        assert!(rpm_label(Some(0), Some(0)).ends_with("(stopped)"));
+        assert_eq!(rpm_label(Some(0), None), "0 RPM");
+        assert_eq!(rpm_label(Some(771), Some(90)), "771 RPM");
     }
 }
