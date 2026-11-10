@@ -31,3 +31,4 @@ with_audit = true
 with_deny = true
 provider = "actions"
 platform = "github"
+push_branches = ["trunk"]
