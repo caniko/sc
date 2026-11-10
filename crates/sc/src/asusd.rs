@@ -3,13 +3,23 @@ use clap::Subcommand;
 use sc_core::asusd_config::{self, Fan, Profile, WireCurve};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use zbus::blocking::Connection;
 
+mod benchmark;
 mod observe;
+mod quiet;
 mod verify;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Observe real fan-noise peaks and spin-up cycles without taking control
+    Acoustics(benchmark::ObservationOptions),
+    /// Reversibly benchmark joint firmware fan settings with raw microphone feedback
+    Benchmark(Box<benchmark::Options>),
+    /// Enforce a qualified quiet envelope with predictive power reduction
+    Supervise {
+        #[arg(long)]
+        config: PathBuf,
+    },
     /// Show supported platform profiles and firmware fan curves
     Status {
         /// Emit the stored curves and read-only live observations as JSON
@@ -98,7 +108,10 @@ struct Change {
 }
 
 pub fn run(command: Command) -> Result<()> {
-    let connection = Connection::system().context("connect to the system D-Bus")?;
+    let connection = zbus::blocking::connection::Builder::system()?
+        .method_timeout(std::time::Duration::from_secs(1))
+        .build()
+        .context("connect to the system D-Bus")?;
     let platform = PlatformBusProxy::builder(&connection)
         .cache_properties(zbus::proxy::CacheProperties::No)
         .build()
@@ -106,6 +119,9 @@ pub fn run(command: Command) -> Result<()> {
     let fans = FanCurvesBusProxy::new(&connection).context("connect to asusd FanCurves")?;
 
     match command {
+        Command::Acoustics(options) => benchmark::observe(&platform, &fans, options),
+        Command::Benchmark(options) => benchmark::run(&platform, &fans, *options),
+        Command::Supervise { config } => quiet::run(&platform, &fans, &config),
         Command::Status { json } => observe::status(&platform, &fans, json),
         Command::Verify { config, json } => observe::verify(&platform, &fans, &config, json),
         Command::Monitor {
@@ -121,8 +137,22 @@ pub fn run(command: Command) -> Result<()> {
             expect_stopped,
             json,
         ),
-        Command::Apply { config, apply } => apply_config(&platform, &fans, &config, apply),
-        Command::Reset { profile, apply } => reset(&platform, &fans, &profile, apply),
+        Command::Apply { config, apply } => {
+            let _lease = if apply {
+                Some(quiet::Lease::acquire()?)
+            } else {
+                None
+            };
+            apply_config(&platform, &fans, &config, apply)
+        }
+        Command::Reset { profile, apply } => {
+            let _lease = if apply {
+                Some(quiet::Lease::acquire()?)
+            } else {
+                None
+            };
+            reset(&platform, &fans, &profile, apply)
+        }
     }
 }
 
@@ -238,7 +268,10 @@ fn apply_config(
         },
     )?;
 
-    println!("Applied {} fan curve(s); asusd stored configuration read-back verified. Use `sc asusd verify` for active kernel state and `sc asusd monitor` for RPM.", changes.len());
+    println!(
+        "Applied {} fan curve(s); asusd stored configuration read-back verified. Use `sc asusd verify` for active kernel state and `sc asusd monitor` for RPM.",
+        changes.len()
+    );
     Ok(())
 }
 

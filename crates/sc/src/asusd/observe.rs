@@ -18,9 +18,13 @@ fn snapshot(platform: &PlatformBusProxy<'_>, expected: Profile) -> Result<Snapsh
     let before = Profile::from_id(platform.platform_profile()?)?;
     let snapshot = read_snapshot(Path::new(HWMON))?;
     let after = Profile::from_id(platform.platform_profile()?)?;
-    anyhow::ensure!(before == expected && after == expected,
+    anyhow::ensure!(
+        before == expected && after == expected,
         "monitor/observation pinned to '{}', observed '{}' then '{}'; start a new observation after the profile settles",
-        expected.name(), before.name(), after.name());
+        expected.name(),
+        before.name(),
+        after.name()
+    );
     Ok(snapshot)
 }
 
@@ -121,7 +125,9 @@ pub(super) fn verify(
         "ASUS stored/kernel curve verification failed"
     );
     if !json_output {
-        println!("Stored declarations and active kernel curve match. This does not establish fan silence; sample RPM with `sc asusd monitor --expect-stopped`.");
+        println!(
+            "Stored declarations and active kernel curve match. This does not establish fan silence; sample RPM with `sc asusd monitor --expect-stopped`."
+        );
     }
     Ok(())
 }

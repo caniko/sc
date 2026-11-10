@@ -1657,6 +1657,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "libc",
  "nvml-wrapper",
  "sc-core",
  "sc-hwmon",
@@ -1664,6 +1665,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-hook",
+ "tempfile",
  "tracing",
  "tracing-journald",
  "tracing-subscriber",

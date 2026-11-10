@@ -194,7 +194,61 @@
   basicCfg = basicSystem.config;
   nvidiaCfg = nvidiaSystem.config;
   asusdCfg = asusdSystem.config;
+  quietSystem = eval {
+    services.asusd.enable = true;
+    services.smartcool.asusd = {
+      enable = true;
+      profiles = nixpkgs.lib.genAttrs ["quiet" "balanced" "performance"] (_: [
+        {
+          fan = "CPU";
+          temp = [40 50 55 60 65 75 85 90];
+          pwm = [0 0 0 40 70 100 150 255];
+        }
+        {
+          fan = "GPU";
+          temp = [35 45 50 55 60 65 78 80];
+          pwm = [0 0 0 0 45 90 150 255];
+        }
+      ]);
+      quietControl = {
+        enable = true;
+        settings = {
+          qualification_id = "module-fixture";
+          hardware = {
+            product = "fixture";
+            board = "fixture";
+            bios = "fixture";
+            kernel = "fixture";
+            nvidia_driver = "fixture";
+            gpu_devices = ["fixture"];
+          };
+          gpu_pci_id = "0000:01:00.0";
+          cpu_start_pwm = 40;
+          gpu_start_pwm = 40;
+          profiles = map (name: {
+            inherit name;
+            cpu_pwm_ceiling = 150;
+            gpu_pwm_ceiling = 150;
+            cpu_ppt = [15 25 35];
+            gpu_clock_mhz = 1200;
+          }) ["quiet" "balanced" "performance"];
+        };
+      };
+    };
+  };
+  quietCfg = quietSystem.config;
 in {
+  module-asusd-quiet = pkgs.runCommand "smartcool-module-asusd-quiet" {} ''
+    test "${quietCfg.systemd.services.smartcool-asusd-quiet.serviceConfig.Type}" = notify
+    test "${quietCfg.systemd.services.smartcool-asusd-quiet.serviceConfig.WatchdogSec}" = 30s
+    test "${toString (builtins.elem "smartcool-asusd.service" quietCfg.systemd.services.smartcool-asusd-quiet.partOf)}" = 1
+    case ${nixpkgs.lib.escapeShellArg quietCfg.systemd.services.smartcool-asusd-quiet-sleep.serviceConfig.ExecStop} in
+      *"/bin/systemctl try-restart smartcool-asusd-quiet.service") ;;
+      *) exit 1 ;;
+    esac
+    ${package}/bin/sc acoustic validate-policy --config ${quietCfg.environment.etc."smartcool/quiet.pkl".source}
+    touch "$out"
+  '';
   module-daemon =
     pkgs.runCommand "smartcool-module-daemon" {
       nativeBuildInputs = [

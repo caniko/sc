@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+libc = "0.2"
 sc-core.workspace = true
 nvml-wrapper = "0.13"
 sc-hwmon = { workspace = true, features = ["nvidia"] }
@@ -19,6 +20,7 @@ sd-notify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
+tempfile.workspace = true
 tracing.workspace = true
 tracing-journald = "0.3"
 tracing-subscriber.workspace = true

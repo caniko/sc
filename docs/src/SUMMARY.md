@@ -12,6 +12,7 @@
 - [NixOS Module](./guides/nixos-module.md)
 - [Hardware Detection](./guides/hardware-detection.md)
 - [Runtime Commands](./guides/runtime-commands.md)
+- [Acoustic Learning](./guides/acoustic-learning.md)
 
 # Reference
 

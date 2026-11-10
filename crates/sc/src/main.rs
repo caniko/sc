@@ -1,8 +1,10 @@
+mod acoustic;
 mod asusd;
 mod controller;
 mod display;
 mod ipc_server;
 mod nvidia;
+mod process;
 mod thermal;
 
 use anyhow::Result;
@@ -18,6 +20,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Observe raw microphone levels or analyze an acoustic benchmark report
+    Acoustic {
+        #[command(subcommand)]
+        command: acoustic::Command,
+    },
     /// Run the fan control daemon
     Daemon {
         /// Path to configuration file (Pkl format)
@@ -50,6 +57,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Acoustic { command } => acoustic::run(command),
         Command::Daemon {
             config: config_path,
         } => controller::run_daemon(&config_path),

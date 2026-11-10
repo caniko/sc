@@ -150,6 +150,15 @@ in {
     asusd = {
       enable = lib.mkEnableOption "declarative asusd firmware fan curves";
 
+      quietControl = {
+        enable = lib.mkEnableOption "acoustically qualified ASUS cooling/power supervision";
+        settings = lib.mkOption {
+          type = lib.types.attrs;
+          default = {};
+          description = "Qualified host-specific quiet envelopes serialized to QuietPolicy.pkl. The supervisor owns GPU locked clocks while active.";
+        };
+      };
+
       profiles = lib.mkOption {
         type = lib.types.attrsOf (lib.types.listOf asusdCurveType);
         default = {};
@@ -170,6 +179,53 @@ in {
   };
 
   config = lib.mkMerge [
+    (lib.mkIf asusdCfg.quietControl.enable {
+      assertions = [
+        {
+          assertion = asusdCfg.enable && !cfg.enable;
+          message = "ASUS quiet supervision requires firmware curves and cannot share fans with the manual hwmon daemon";
+        }
+      ];
+      environment.etc."smartcool/quiet.pkl".text = ''
+        amends "${../pkl/QuietPolicy.pkl}"
+        ${pklModule asusdCfg.quietControl.settings}
+      '';
+      systemd.tmpfiles.rules = ["d /run/smartcool 0755 root root -"];
+      systemd.services.smartcool-asusd-quiet = {
+        description = "Enforce SmartCool's qualified ASUS acoustic envelope";
+        wantedBy = ["multi-user.target"];
+        after = ["asusd.service" "smartcool-asusd.service"];
+        requires = ["asusd.service" "smartcool-asusd.service"];
+        partOf = ["asusd.service" "smartcool-asusd.service"];
+        restartTriggers = [config.environment.etc."smartcool/quiet.pkl".source];
+        path = [config.hardware.nvidia.package pkgs.coreutils];
+        serviceConfig = {
+          Type = "notify";
+          NotifyAccess = "main";
+          WatchdogSec = "30s";
+          TimeoutStartSec = "30s";
+          ExecStart = "${cfg.package}/bin/sc asusd supervise --config /etc/smartcool/quiet.pkl";
+          Restart = "on-failure";
+          RestartSec = "5s";
+          TimeoutStopSec = "60s";
+          KillMode = "control-group";
+        };
+      };
+      # Respect an intentionally stopped supervisor, but reapply GPU clock
+      # requests after drivers suspend/reset. No extra shell policy engine.
+      systemd.services.smartcool-asusd-quiet-sleep = {
+        wantedBy = ["sleep.target"];
+        before = ["sleep.target"];
+        unitConfig.StopWhenUnneeded = true;
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = "${pkgs.coreutils}/bin/true";
+          ExecStop = "${config.systemd.package}/bin/systemctl try-restart smartcool-asusd-quiet.service";
+          TimeoutStopSec = "90s";
+        };
+      };
+    })
     (lib.mkIf (cfg.enable || asusdCfg.enable) {
       environment.systemPackages = [cfg.package];
     })

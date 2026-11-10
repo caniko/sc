@@ -70,7 +70,7 @@
       pkgs = rawPkgsFor system;
       harbor = harbor-rs.lib;
       toolchain = harbor.mkToolchain {inherit pkgs;};
-      craneLib = toolchain.craneLib;
+      inherit (toolchain) craneLib;
       nativeBuildInputs = harbor.mkRustNativeBuildInputs {
         inherit pkgs;
         extra = [pkgs.pkg-config];
@@ -91,7 +91,7 @@
         pname = "smartcool";
         version = "0.1.0";
         SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
-        inherit nativeBuildInputs;
+        nativeBuildInputs = nativeBuildInputs ++ [pkgs.makeWrapper];
       };
       cargoArtifacts = cacheRust (craneLib.buildDepsOnly commonArgs);
       buildPackage = package:
@@ -101,6 +101,9 @@
             inherit cargoArtifacts;
             pname = package;
             cargoExtraArgs = "--package ${package}";
+            postInstall = pkgs.lib.optionalString (package == "smartcool") ''
+              wrapProgram $out/bin/sc --prefix PATH : ${pkgs.lib.makeBinPath [pkgs.pulseaudio pkgs.coreutils pkgs.util-linux]}
+            '';
             meta.mainProgram =
               if package == "smartcool"
               then "sc"
@@ -159,7 +162,7 @@
       pkgs = rawPkgsFor system;
       harbor = harbor-rs.lib;
       toolchain = harbor.mkToolchain {inherit pkgs;};
-      craneLib = toolchain.craneLib;
+      inherit (toolchain) craneLib;
       packages = mkPackages system;
       nativeBuildInputs = harbor.mkRustNativeBuildInputs {
         inherit pkgs;
@@ -255,6 +258,7 @@
       module-nvidia = moduleChecks.module-nvidia;
       module-asusd = moduleChecks.module-asusd;
       module-asusd-assertions = moduleChecks.module-asusd-assertions;
+      module-asusd-quiet = moduleChecks.module-asusd-quiet;
       cli-runnable = pkgs.runCommand "smartcool-cli-runnable" {} ''
         ${pkgs.lib.getExe packages.smartcool} --help >/dev/null
         ${pkgs.lib.getExe packages.sc-nixgen} --help >/dev/null
@@ -282,7 +286,7 @@
   in {
     overlays.default = final: _prev: mkPackages final.stdenv.hostPlatform.system;
 
-    packages = forSystems (system: mkPackages system);
+    packages = forSystems mkPackages;
 
     formatter = forSystems (system: let
       pkgs = rawPkgsFor system;
@@ -310,7 +314,9 @@
             pkgs.cargo-deny
             pkgs.mdbook
             plinthProject
-            self.packages.${system}.sc-nixgen
+            # Native checks must work before the project package compiles.
+            pkgs.pulseaudio
+            pkgs.util-linux
           ]
           ++ pre-commit-check.enabledPackages;
         shellHook = ''
