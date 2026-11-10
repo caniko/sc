@@ -7,17 +7,8 @@ pub fn load<T>(path: &Path, kind: &str) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
 {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("create Pkl evaluation runtime")?;
-
-    runtime
-        .block_on(pklx::eval_to_typed(
-            path,
-            pklx::pklr::EvalOptions::default(),
-        ))
-        .map_err(|e| anyhow::anyhow!("failed to evaluate {kind} Pkl {}: {}", path.display(), e))
+    sc_core::config::load_pkl(path)
+        .with_context(|| format!("failed to evaluate {kind} Pkl {}", path.display()))
 }
 
 pub fn to_pkl<T>(value: &T) -> Result<String>

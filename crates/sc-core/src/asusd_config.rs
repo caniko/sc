@@ -368,4 +368,42 @@ profiles = new Listing {
         let config = load(&path).unwrap();
         assert_eq!(config.profiles[0].curves[0].wire().unwrap().0, "CPU");
     }
+
+    // The NixOS module renders typed instances amending the shipped schema;
+    // pklr 5.1 rejected the set `fan` union ("has no selected default").
+    #[test]
+    fn loads_module_shaped_pkl_config() {
+        let schema = concat!(env!("CARGO_MANIFEST_DIR"), "/../../pkl/AsusdConfig.pkl");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("asusd.pkl");
+        std::fs::write(
+            &path,
+            format!(
+                r#"amends "{schema}"
+
+profiles = new Listing {{
+  new Profile {{
+    name = "quiet"
+    curves = new Listing {{
+      new FanCurve {{
+        fan = "GPU"
+        temp = new Listing {{ 30; 40; 50; 60; 70; 80; 90; 100 }}
+        pwm = new Listing {{ 0; 10; 30; 60; 100; 150; 210; 255 }}
+      }}
+    }}
+  }}
+}}
+"#
+            ),
+        )
+        .unwrap();
+
+        let config = load(&path).unwrap();
+        assert_eq!(config.profiles[0].curves[0].wire().unwrap().0, "GPU");
+
+        std::fs::write(&path, format!("amends \"{schema}\"\nprofiles = 1\n")).unwrap();
+        let error = format!("{:#}", load(&path).unwrap_err());
+        // The cause survives, not only pklx's "Failed to deserialize" wrapper.
+        assert!(error.contains("expected a sequence"), "{error}");
+    }
 }

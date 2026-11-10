@@ -184,7 +184,9 @@ pub fn load(path: &Path) -> Result<Config> {
     Ok(config)
 }
 
-pub(crate) fn load_pkl<T>(path: &Path) -> Result<T>
+/// Evaluate a Pkl file. The error keeps the evaluator's own message: a pklx
+/// report displays only its outermost "Failed to evaluate" wrapper.
+pub fn load_pkl<T>(path: &Path) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
 {
@@ -198,7 +200,15 @@ where
             path,
             pklx::pklr::EvalOptions::default(),
         ))
-        .map_err(|e| anyhow::anyhow!("failed to evaluate Pkl {}: {}", path.display(), e))
+        .map_err(|e| {
+            let mut causes: Vec<String> = e.chain().map(ToString::to_string).collect();
+            causes.dedup();
+            anyhow::anyhow!(
+                "failed to evaluate Pkl {}: {}",
+                path.display(),
+                causes.join(": ")
+            )
+        })
 }
 
 fn validate(config: &Config) -> Result<()> {

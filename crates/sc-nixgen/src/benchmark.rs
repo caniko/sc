@@ -94,26 +94,10 @@ fn default_count() -> u32 {
 }
 
 pub fn load_topology(path: &Path) -> Result<Topology> {
-    let topo: Topology = load_pkl(path)?;
+    let topo: Topology = sc_core::config::load_pkl(path)
+        .with_context(|| format!("failed to evaluate topology Pkl {}", path.display()))?;
     anyhow::ensure!(!topo.fans.is_empty(), "topology file has no fan entries");
     Ok(topo)
-}
-
-fn load_pkl<T>(path: &Path) -> Result<T>
-where
-    T: serde::de::DeserializeOwned,
-{
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("create Pkl evaluation runtime")?;
-
-    runtime
-        .block_on(pklx::eval_to_typed(
-            path,
-            pklx::pklr::EvalOptions::default(),
-        ))
-        .map_err(|e| anyhow::anyhow!("failed to evaluate topology Pkl {}: {}", path.display(), e))
 }
 
 /// Generate a topology Pkl template from detection results.
