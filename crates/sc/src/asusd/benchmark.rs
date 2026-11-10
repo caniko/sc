@@ -1,6 +1,6 @@
 use super::verify::fan_rpms;
 use super::{read_curves, FanCurvesBusProxy, PlatformBusProxy, Profile, WireCurve};
-use crate::acoustic::{interrupt, Feed, Measurement};
+use crate::acoustic::{as_user, interrupt, Feed, Measurement};
 use crate::process::{output, Process};
 use anyhow::{ensure, Context, Result};
 use clap::Args;
@@ -10,6 +10,7 @@ use sc_core::acoustics::{
 use sc_hwmon::telemetry::{read_snapshot, Snapshot};
 use serde::Serialize;
 use serde_json::json;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -153,6 +154,11 @@ pub struct Options {
     /// Exclusive NVIDIA clock ownership for this trial; reset to driver defaults on exit
     #[arg(long, requires = "gpu", value_parser = clap::value_parser!(u32).range(210..=1800))]
     pub gpu_clock_mhz: Option<u32>,
+    /// Stop the workload while AMC admission requests (of the capture user,
+    /// when given) wait for capacity; restart it and the interrupted window
+    /// once they finish. The optional value is the amc executable
+    #[arg(long, num_args = 0..=1, default_missing_value = "amc", value_name = "AMC")]
+    pub yield_to_amc: Option<String>,
     /// Preview by default. --apply starts the supplied workload and changes curves
     #[arg(long)]
     pub apply: bool,
@@ -455,6 +461,58 @@ fn slope(samples: &[Sample], gpu: bool) -> f64 {
     pairs.iter().map(|p| (p.0 - x) * (p.1 - y)).sum::<f64>() / denominator
 }
 
+#[derive(serde::Deserialize)]
+struct Ticket {
+    id: String,
+}
+
+#[derive(serde::Deserialize)]
+struct Waiting {
+    reason: String,
+}
+
+#[derive(serde::Deserialize)]
+struct Admission {
+    entries: Vec<Ticket>,
+    waiting: BTreeMap<String, Waiting>,
+}
+
+/// From `amc admission status --json`: the requests waiting for capacity the
+/// workload may hold, and every request that has not finished.
+fn contenders(status: &[u8]) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+    let status: Admission = serde_json::from_slice(status).context("parse AMC status")?;
+    Ok((
+        status
+            .waiting
+            .into_iter()
+            // Stopping the workload relieves neither a pause marker nor a
+            // missing native manager; a FIFO follower's head speaks for it.
+            .filter(|(_, w)| !matches!(w.reason.as_str(), "paused" | "native_unavailable" | "fifo"))
+            .map(|(id, _)| id)
+            .collect(),
+        status.entries.into_iter().map(|e| e.id).collect(),
+    ))
+}
+
+fn admission(argv: &[String]) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+    let status = output(
+        Command::new(&argv[0]).args(&argv[1..]),
+        Duration::from_secs(2),
+    )
+    .context("query AMC admission")?;
+    contenders(&status)
+}
+
+fn spawn(workload: &[String]) -> Result<Process> {
+    Process::spawn(
+        Command::new(&workload[0])
+            .args(&workload[1..])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit()),
+    )
+}
+
 struct Session<'a> {
     // Rust drops fields in declaration order, including during unwinding.
     // Stop heat generation before restoring curves on every exit path.
@@ -469,23 +527,48 @@ struct Session<'a> {
     started: Instant,
     all_samples: Vec<Sample>,
     last_counter: Option<u64>,
+    amc: Option<Vec<String>>,
+    yields: u32,
 }
 
 impl Session<'_> {
-    fn sample(&mut self, pair: (u8, u8), spinup_grace: bool) -> Result<Sample> {
-        ensure!(!self.flag.load(Ordering::Relaxed), "benchmark interrupted");
-        ensure!(
-            self.started.elapsed() < Duration::from_secs(self.options.duration_seconds),
-            "benchmark deadline reached"
-        );
-        ensure!(
-            !self.workload.has_exited()?,
-            "benchmark workload exited before qualification completed"
-        );
-        ensure!(
-            Profile::from_id(self.platform.platform_profile()?)? == self.curves.profile,
-            "profile changed; stop and start a new experiment"
-        );
+    /// Give the workload's compute to AMC requests waiting for capacity and
+    /// take it back once they finish. Returns whether the workload restarted.
+    fn yield_to_amc(&mut self) -> Result<bool> {
+        let Some(argv) = self.amc.clone() else {
+            return Ok(false);
+        };
+        let (mut served, _) = admission(&argv)?;
+        if served.is_empty() {
+            return Ok(false);
+        }
+        self.workload.stop()?;
+        println!("{}", json!({"type":"amc_yield", "requests":served}));
+        while !served.is_empty() {
+            ensure!(!self.flag.load(Ordering::Relaxed), "benchmark interrupted");
+            ensure!(
+                self.started.elapsed() < Duration::from_secs(self.options.duration_seconds),
+                "benchmark deadline reached while yielding to AMC"
+            );
+            // Admitted work runs under the trial curve: keep the thermal
+            // guard. The sleep spaces this energy read from the next one,
+            // here or in the restarted window; capture may be backlogged.
+            self.guard()?;
+            std::thread::sleep(Duration::from_secs(1));
+            self.feed.resync()?;
+            let (waiting, live) = admission(&argv)?;
+            served.extend(waiting);
+            served.retain(|id| live.contains(id));
+        }
+        self.workload = spawn(&self.options.workload)?;
+        // A restarted workload may restart its counter.
+        self.last_counter = None;
+        self.yields += 1;
+        println!("{}", json!({"type":"amc_resume"}));
+        Ok(true)
+    }
+
+    fn guard(&mut self) -> Result<(Snapshot, Thermal)> {
         let snapshot = read_snapshot(Path::new("/sys/class/hwmon"))?;
         let active = self
             .options
@@ -494,28 +577,49 @@ impl Session<'_> {
             .map(gpu_active)
             .transpose()?
             .unwrap_or(false);
-        ensure!(
-            !self.options.require_gpu_load || active,
-            "benchmark GPU is not active"
-        );
         let thermal = thermal(
             &snapshot,
             &mut self.energy,
             self.options.gpu.as_deref().filter(|_| active),
         )?;
         ensure!(
-            self.options
-                .gpu_clock_mhz
-                .zip(thermal.gpu_clock_mhz)
-                .is_none_or(|(cap, clock)| clock <= f64::from(cap) + 15.0),
-            "NVIDIA clock request ineffective"
-        );
-        ensure!(
             thermal.cpu_c < self.options.cpu_stop_c
                 && thermal.gpu_c.is_none_or(|t| t < self.options.gpu_stop_c),
             "thermal guard reached: CPU {:.1} C, GPU {:?}",
             thermal.cpu_c,
             thermal.gpu_c
+        );
+        Ok((snapshot, thermal))
+    }
+
+    fn sample(&mut self, pair: (u8, u8), spinup_grace: bool) -> Result<Option<Sample>> {
+        ensure!(!self.flag.load(Ordering::Relaxed), "benchmark interrupted");
+        ensure!(
+            self.started.elapsed() < Duration::from_secs(self.options.duration_seconds),
+            "benchmark deadline reached"
+        );
+        if self.yield_to_amc()? {
+            return Ok(None);
+        }
+        ensure!(
+            !self.workload.has_exited()?,
+            "benchmark workload exited before qualification completed"
+        );
+        ensure!(
+            Profile::from_id(self.platform.platform_profile()?)? == self.curves.profile,
+            "profile changed; stop and start a new experiment"
+        );
+        let (snapshot, thermal) = self.guard()?;
+        ensure!(
+            !self.options.require_gpu_load || thermal.gpu_c.is_some(),
+            "benchmark GPU is not active"
+        );
+        ensure!(
+            self.options
+                .gpu_clock_mhz
+                .zip(thermal.gpu_clock_mhz)
+                .is_none_or(|(cap, clock)| clock <= f64::from(cap) + 15.0),
+            "NVIDIA clock request ineffective"
         );
         let runtime = super::RuntimeState {
             active: self.curves.profile,
@@ -586,14 +690,26 @@ impl Session<'_> {
             json!({"type":"sample", "cpu_pwm":pair.0, "gpu_pwm":pair.1, "sample":sample})
         )?;
         self.all_samples.push(sample.clone());
-        Ok(sample)
+        Ok(Some(sample))
     }
 
     fn window(&mut self, pair: (u8, u8)) -> Result<Vec<Sample>> {
+        loop {
+            // A yield invalidates the thermal state: settle and measure again.
+            if let Some(samples) = self.attempt(pair)? {
+                return Ok(samples);
+            }
+        }
+    }
+
+    fn attempt(&mut self, pair: (u8, u8)) -> Result<Option<Vec<Sample>>> {
         let start = Instant::now();
         let mut settling = Vec::new();
         loop {
-            settling.push(self.sample(pair, start.elapsed() < Duration::from_secs(10))?);
+            let Some(sample) = self.sample(pair, start.elapsed() < Duration::from_secs(10))? else {
+                return Ok(None);
+            };
+            settling.push(sample);
             if settling.len() > self.options.window_seconds as usize {
                 settling.remove(0);
             }
@@ -615,7 +731,10 @@ impl Session<'_> {
         }
         let mut samples = Vec::new();
         for _ in 0..self.options.window_seconds {
-            samples.push(self.sample(pair, false)?);
+            let Some(sample) = self.sample(pair, false)? else {
+                return Ok(None);
+            };
+            samples.push(sample);
         }
         let gpu_active = samples[0].thermal.gpu_c.is_some();
         ensure!(
@@ -640,7 +759,7 @@ impl Session<'_> {
                 "GPU workload was not confirmed active"
             );
         }
-        Ok(samples)
+        Ok(Some(samples))
     }
 }
 
@@ -678,6 +797,22 @@ pub fn run<'a>(
         })
         .transpose()?;
     policy.validate()?;
+    let amc = options
+        .yield_to_amc
+        .as_ref()
+        .map(|amc| -> Result<Vec<String>> {
+            let mut argv = options
+                .capture_user
+                .as_deref()
+                .map(as_user)
+                .transpose()?
+                .unwrap_or_default();
+            argv.extend([amc.as_str(), "admission", "status", "--json"].map(String::from));
+            // Fail before any hardware mutation if the coordinator is unreachable.
+            admission(&argv)?;
+            Ok(argv)
+        })
+        .transpose()?;
     let runtime = super::discover(platform, fans)?;
     let originals = runtime.curves[&runtime.active].clone();
     ensure!(
@@ -754,13 +889,7 @@ pub fn run<'a>(
         restored: false,
     };
     curves.set(levels[0])?;
-    let workload = Process::spawn(
-        Command::new(&options.workload[0])
-            .args(&options.workload[1..])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit()),
-    )?;
+    let workload = spawn(&options.workload)?;
     let mut session = Session {
         platform,
         curves,
@@ -773,6 +902,8 @@ pub fn run<'a>(
         workload,
         all_samples: Vec::new(),
         last_counter: None,
+        amc,
+        yields: 0,
     };
     let mut measurements: Trials = levels.iter().map(|pair| (*pair, Vec::new())).collect();
     let result = (|| -> Result<()> {
@@ -923,7 +1054,7 @@ pub fn run<'a>(
         "selection_policy":policy, "candidates":candidates, "selected":if success { selected.as_ref().ok() } else { None },
         "selection_error":selected.err().map(|e|e.to_string()), "trials":measurements, "samples":session.all_samples,
         "repeated_candidates":repeated,
-        "benchmark_error":result.as_ref().err().map(|e|format!("{e:#}")), "workload_stopped":workload_restore.is_ok(),
+        "benchmark_error":result.as_ref().err().map(|e|format!("{e:#}")), "workload_stopped":workload_restore.is_ok(), "amc_yields":session.yields,
         "curves_restored":curve_restore.is_ok(), "qualification":"candidate for the tested workload/profile/setup; requires burst, combined-load and lifecycle acceptance"});
     // Atomic metrics-only report: an interrupted write cannot masquerade as a
     // completed previous qualification or destroy its evidence in place.
@@ -962,5 +1093,17 @@ mod tests {
         for value in ["40:40,255:255", "40:40,100:20", "40:40", "0:40,100:100"] {
             assert!(levels(value).is_err());
         }
+    }
+    #[test]
+    fn amc_contenders_are_capacity_waiters_and_stay_live_until_finished() {
+        let status = br#"{"budget_bytes":1,"reserve_bytes":1,"committed_bytes":0,
+            "entries":[{"id":"a","phase":"queued"},{"id":"b","phase":"queued"},{"id":"c","phase":"running"}],
+            "waiting":{"a":{"reason":"shared_headroom","headroom":null},"b":{"reason":"paused","headroom":null},
+                "c":{"reason":"fifo","headroom":null}},
+            "unreconciled":[]}"#;
+        let (waiting, live) = contenders(status).unwrap();
+        assert_eq!(waiting, BTreeSet::from(["a".to_owned()]));
+        assert_eq!(live.len(), 3);
+        assert!(contenders(b"{}").is_err());
     }
 }

@@ -75,6 +75,16 @@ cooling if the controller is killed; abrupt death cannot guarantee restoration
 of mutable asusd/PPT/clock state. Verify/reapply the declaration after such an
 exit before resuming qualification.
 
+`--yield-to-amc[=AMC]` shares the machine with [AMC](https://codeberg.org/caniko/amc)
+admission. While a request of the capture user's coordinator (the caller's
+without `--capture-user`) waits for capacity, the benchmark stops the workload,
+keeps the trial curve, and waits for those requests to finish. It then restarts
+the workload and repeats the interrupted settle/measurement window; the report
+counts `amc_yields`. Requests blocked only by a pause marker or an unavailable
+native manager are ignored. Yield time counts against `--duration-seconds`, and
+the workload must tolerate being restarted. Do not admit the workload itself
+through that coordinator: its own queued request would look like a waiter.
+
 An optional monotonically increasing `--throughput-counter` supplies a
 workload-owned completed-work counter. Retain workload verification and
 throughput results alongside the report. A cooling sweep alone does not prove

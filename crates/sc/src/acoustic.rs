@@ -259,6 +259,35 @@ fn capture(source: &str, duration_seconds: u64) -> Result<()> {
     process.stop()
 }
 
+/// Argument prefix that runs a command in `user`'s desktop session.
+pub fn as_user(user: &str) -> Result<Vec<String>> {
+    ensure!(
+        !user.is_empty()
+            && user
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+        "invalid capture user"
+    );
+    let uid = output(Exec::new("id").args(["-u", user]), Duration::from_secs(2))?;
+    let uid: u32 = std::str::from_utf8(&uid)?.trim().parse()?;
+    ensure!(uid != 0, "capture user must have a desktop audio session");
+    let mut prefix: Vec<String> = [
+        "runuser",
+        "-u",
+        user,
+        "--",
+        "env",
+        "-u",
+        "PULSE_SERVER",
+        "-u",
+        "PULSE_SOURCE",
+    ]
+    .map(String::from)
+    .into();
+    prefix.push(format!("XDG_RUNTIME_DIR=/run/user/{uid}"));
+    Ok(prefix)
+}
+
 pub struct Feed {
     _process: Process,
     receiver: mpsc::Receiver<Measurement>,
@@ -273,29 +302,9 @@ impl Feed {
     pub fn start(source: &str, user: Option<&str>, duration_seconds: u64) -> Result<Self> {
         let executable = std::env::current_exe()?;
         let mut command = if let Some(user) = user {
-            ensure!(
-                !user.is_empty()
-                    && user
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
-                "invalid capture user"
-            );
-            let uid = output(Exec::new("id").args(["-u", user]), Duration::from_secs(2))?;
-            let uid: u32 = std::str::from_utf8(&uid)?.trim().parse()?;
-            ensure!(uid != 0, "capture user must have a desktop audio session");
-            let mut command = Exec::new("runuser");
-            command.args([
-                "-u",
-                user,
-                "--",
-                "env",
-                "-u",
-                "PULSE_SERVER",
-                "-u",
-                "PULSE_SOURCE",
-                &format!("XDG_RUNTIME_DIR=/run/user/{uid}"),
-            ]);
-            command.arg(executable);
+            let prefix = as_user(user)?;
+            let mut command = Exec::new(&prefix[0]);
+            command.args(&prefix[1..]).arg(executable);
             command
         } else {
             Exec::new(executable)
@@ -341,6 +350,19 @@ impl Feed {
             arrival: Instant::now(),
             source: source.into(),
         })
+    }
+
+    /// Discard measurements queued while the caller was not sampling, then
+    /// validate the next live one.
+    pub fn resync(&mut self) -> Result<&Measurement> {
+        // The reader thread forwards its own backlog right behind the
+        // channel's: only a quiet gap means the queue is live again.
+        while self
+            .receiver
+            .recv_timeout(Duration::from_millis(50))
+            .is_ok()
+        {}
+        self.sample()
     }
 
     pub fn sample(&mut self) -> Result<&Measurement> {
